@@ -53,7 +53,19 @@ static std::vector<std::string> s_project_options {
     // K/S per-filament TD1S overrides (editable in sidebar, stored per-project)
     "filament_td1s",
     // K/S per-filament measured physical colour overrides (editable in sidebar, stored per-project)
-    "filament_ks_colour"
+    "filament_ks_colour",
+    // Mixed filament / local-Z settings
+    "mixed_filament_gradient_mode",
+    "mixed_filament_height_lower_bound",
+    "mixed_filament_height_upper_bound",
+    "mixed_filament_cycle_layers",
+    "mixed_filament_advanced_dithering",
+    "mixed_filament_definitions",
+    "mixed_color_layer_height_a",
+    "mixed_color_layer_height_b",
+    "dithering_z_step_size",
+    "dithering_local_z_mode",
+    "dithering_step_painted_zones_only",
 };
 
 //Orca: add custom as default
@@ -4333,6 +4345,24 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
         ConfigOptionStrings *color_opt = this->project_config.option<ConfigOptionStrings>("filament_colour");
         if (color_opt) {
             DynamicPrintConfig &print_cfg = this->prints.get_edited_preset().config;
+            auto get_mixed_int = [this, &print_cfg](const std::string &key, int fallback) {
+                if (this->project_config.has(key))
+                    return this->project_config.opt_int(key);
+                if (print_cfg.has(key))
+                    return print_cfg.opt_int(key);
+                return fallback;
+            };
+            auto get_mixed_bool = [this, &print_cfg](const std::string &key, bool fallback) {
+                if (const ConfigOptionBool *opt = this->project_config.option<ConfigOptionBool>(key))
+                    return opt->value;
+                if (const ConfigOptionInt *opt = this->project_config.option<ConfigOptionInt>(key))
+                    return opt->value != 0;
+                if (const ConfigOptionBool *opt = print_cfg.option<ConfigOptionBool>(key))
+                    return opt->value;
+                if (const ConfigOptionInt *opt = print_cfg.option<ConfigOptionInt>(key))
+                    return opt->value != 0;
+                return fallback;
+            };
             auto get_mixed_mode = [this, &print_cfg](bool fallback) {
                 if (const ConfigOptionBool *opt = this->project_config.option<ConfigOptionBool>("mixed_filament_gradient_mode"))
                     return opt->value;
@@ -4349,13 +4379,6 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
                     return float(this->project_config.opt_float(key));
                 if (print_cfg.has(key))
                     return float(print_cfg.opt_float(key));
-                return fallback;
-            };
-            auto get_mixed_bool = [this, &print_cfg](const std::string &key, bool fallback) {
-                if (const ConfigOptionBool *opt = this->project_config.option<ConfigOptionBool>(key))
-                    return opt->value;
-                if (const ConfigOptionBool *opt = print_cfg.option<ConfigOptionBool>(key))
-                    return opt->value;
                 return fallback;
             };
             auto get_mixed_string = [this, &print_cfg](const std::string &key) {

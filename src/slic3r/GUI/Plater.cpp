@@ -5017,6 +5017,13 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     std::vector<std::string> physical_colors = color_opt ? color_opt->values : std::vector<std::string>();
     physical_colors.resize(num_physical, "#26A69A");
 
+    auto get_mixed_int = [preset_bundle, print_cfg](const std::string &key, int fallback) {
+        if (preset_bundle->project_config.has(key))
+            return preset_bundle->project_config.opt_int(key);
+        if (print_cfg && print_cfg->has(key))
+            return print_cfg->opt_int(key);
+        return fallback;
+    };
     auto get_mixed_bool = [preset_bundle, print_cfg](const std::string &key, bool fallback) {
         if (const ConfigOptionBool *opt = preset_bundle->project_config.option<ConfigOptionBool>(key))
             return opt->value;
@@ -5062,6 +5069,14 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
                 return print_value;
         }
         return project_value.empty() ? fallback : project_value;
+    };
+    auto set_mixed_int = [preset_bundle, print_cfg](const std::string &key, int value) {
+        if (print_cfg) {
+            if (ConfigOptionInt *opt = print_cfg->option<ConfigOptionInt>(key))
+                opt->value = value;
+            else
+                print_cfg->set_key_value(key, new ConfigOptionInt(value));
+        }
     };
     auto set_mixed_float = [preset_bundle, print_cfg](const std::string &key, float value) {
         if (print_cfg) {
@@ -5450,6 +5465,7 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         mixed_mgr.load_custom_entries(mixed_definitions, physical_colors, td1s_vals, lh);
         mixed_mgr.apply_gradient_settings(gradient_mode, lower_bound, upper_bound, advanced_dithering);
     }
+
 
     // During project load, sidebar may refresh before physical filament combos
     // finish syncing. Avoid overwriting persisted mixed definitions while the
