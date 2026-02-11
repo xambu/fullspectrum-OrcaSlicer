@@ -926,6 +926,7 @@ FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
 
 void PrintObject::clear_layers()
 {
+    this->clear_local_z_plan();
     if (!m_shared_object) {
         for (Layer *l : m_layers)
             delete l;
@@ -1072,6 +1073,9 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posPerimeters);
         } else if (
                opt_key == "layer_height"
+            || opt_key == "dithering_z_step_size"
+            || opt_key == "dithering_local_z_mode"
+            || opt_key == "dithering_step_painted_zones_only"
             || opt_key == "mmu_segmented_region_max_width"
             || opt_key == "mmu_segmented_region_interlocking_depth"
             || opt_key == "raft_layers"
@@ -1362,6 +1366,7 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        this->clear_local_z_plan();
     } else if (step == posSupportMaterial) {
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
@@ -1383,6 +1388,7 @@ bool PrintObject::invalidate_all_steps()
     bool result = Inherited::invalidate_all_steps() | m_print->invalidate_all_steps();
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
+    this->clear_local_z_plan();
 	return result;
 }
 
@@ -3460,6 +3466,80 @@ std::vector<unsigned int> PrintObject::object_extruders() const
 bool PrintObject::update_layer_height_profile(const ModelObject &model_object, const SlicingParameters &slicing_parameters, std::vector<coordf_t> &layer_height_profile)
 {
     bool updated = false;
+
+    const t_layer_config_ranges *ranges_to_use = &model_object.layer_config_ranges;
+    t_layer_config_ranges        mixed_gradient_ranges;
+    t_layer_config_ranges        dithering_ranges;
+    if (print_object != nullptr && print_object->print() != nullptr) {
+        const DynamicPrintConfig &full_cfg = print_object->print()->full_print_config();
+        const PrintConfig        &print_cfg = print_object->print()->config();
+
+        bool height_weighted_mode = print_cfg.mixed_filament_gradient_mode.value;
+        if (full_cfg.has("mixed_filament_gradient_mode")) {
+            if (const ConfigOptionBool *opt = full_cfg.option<ConfigOptionBool>("mixed_filament_gradient_mode"))
+                height_weighted_mode = opt->value;
+            else if (const ConfigOptionInt *opt = full_cfg.option<ConfigOptionInt>("mixed_filament_gradient_mode"))
+                height_weighted_mode = (opt->value != 0);
+        }
+
+        coordf_t mixed_lower = coordf_t(print_cfg.mixed_filament_height_lower_bound.value);
+        coordf_t mixed_upper = coordf_t(print_cfg.mixed_filament_height_upper_bound.value);
+        if (full_cfg.has("mixed_filament_height_lower_bound"))
+            mixed_lower = coordf_t(full_cfg.opt_float("mixed_filament_height_lower_bound"));
+        if (full_cfg.has("mixed_filament_height_upper_bound"))
+            mixed_upper = coordf_t(full_cfg.opt_float("mixed_filament_height_upper_bound"));
+        mixed_lower = std::max<coordf_t>(0.01f, mixed_lower);
+        mixed_upper = std::max<coordf_t>(mixed_lower, mixed_upper);
+
+        if (height_weighted_mode) {
+            const coordf_t object_height = slicing_parameters.object_print_z_uncompensated_height();
+            const auto mixed_states = collect_mixed_painted_z_ranges_by_state(*print_object, object_height);
+            if (!mixed_states.empty()) {
+                mixed_gradient_ranges = layer_ranges_with_height_weighted_mixed(*ranges_to_use,
+                                                                                object_height,
+                                                                                slicing_parameters.layer_height,
+                                                                                mixed_states,
+                                                                                print_object->print()->mixed_filament_manager(),
+                                                                                print_cfg.filament_colour.size(),
+                                                                                mixed_lower,
+                                                                                mixed_upper);
+                ranges_to_use = &mixed_gradient_ranges;
+            }
+        }
+
+        coordf_t                  dithering_step = coordf_t(print_object->print()->config().dithering_z_step_size.value);
+        bool                      local_z_mode = print_object->print()->config().dithering_local_z_mode.value;
+        bool                      painted_zones_only = print_object->print()->config().dithering_step_painted_zones_only.value;
+        if (full_cfg.has("dithering_z_step_size"))
+            dithering_step = coordf_t(full_cfg.opt_float("dithering_z_step_size"));
+        if (full_cfg.has("dithering_local_z_mode")) {
+            if (const ConfigOptionBool *opt = full_cfg.option<ConfigOptionBool>("dithering_local_z_mode"))
+                local_z_mode = opt->value;
+            else if (const ConfigOptionInt *opt = full_cfg.option<ConfigOptionInt>("dithering_local_z_mode"))
+                local_z_mode = (opt->value != 0);
+        }
+        if (full_cfg.has("dithering_step_painted_zones_only"))
+            painted_zones_only = full_cfg.opt_bool("dithering_step_painted_zones_only");
+
+        if (!height_weighted_mode && !local_z_mode && dithering_step > EPSILON) {
+            const coordf_t object_height = slicing_parameters.object_print_z_uncompensated_height();
+            std::vector<t_layer_height_range> mixed_ranges;
+            if (painted_zones_only)
+                mixed_ranges = collect_mixed_painted_z_ranges(*print_object, object_height);
+            else if (object_height > EPSILON)
+                mixed_ranges.emplace_back(0.f, object_height);
+
+            if (!mixed_ranges.empty()) {
+                dithering_ranges = layer_ranges_with_dithering(*ranges_to_use,
+                                                               object_height,
+                                                               slicing_parameters.layer_height,
+                                                               mixed_ranges,
+                                                               dithering_step);
+                ranges_to_use = &dithering_ranges;
+            }
+        }
+    }
+    const bool has_dithering_ranges = (ranges_to_use != &model_object.layer_config_ranges);
 
     if (layer_height_profile.empty()) {
         // use the constructor because the assignement is crashing on ASAN OsX

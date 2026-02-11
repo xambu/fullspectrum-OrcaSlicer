@@ -1116,7 +1116,34 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	new_full_config.option("print_settings_id",            true);
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
-
+    // Ensure newly introduced dithering keys are present so in-session updates are detected.
+    new_full_config.option("dithering_z_step_size", true);
+    new_full_config.option("dithering_local_z_mode", true);
+    new_full_config.option("dithering_step_painted_zones_only", true);
+    new_full_config.option("mixed_filament_gradient_mode", true);
+    new_full_config.option("mixed_filament_height_lower_bound", true);
+    new_full_config.option("mixed_filament_height_upper_bound", true);
+    new_full_config.option("mixed_filament_cycle_layers", true);
+    new_full_config.option("mixed_filament_advanced_dithering", true);
+    new_full_config.option("mixed_filament_definitions", true);
+    m_config.option("dithering_z_step_size", true);
+    m_config.option("dithering_local_z_mode", true);
+    m_config.option("dithering_step_painted_zones_only", true);
+    m_config.option("mixed_filament_gradient_mode", true);
+    m_config.option("mixed_filament_height_lower_bound", true);
+    m_config.option("mixed_filament_height_upper_bound", true);
+    m_config.option("mixed_filament_cycle_layers", true);
+    m_config.option("mixed_filament_advanced_dithering", true);
+    m_config.option("mixed_filament_definitions", true);
+    m_default_object_config.option("dithering_z_step_size", true);
+    m_default_object_config.option("dithering_local_z_mode", true);
+    m_default_object_config.option("dithering_step_painted_zones_only", true);
+    m_default_object_config.option("mixed_filament_gradient_mode", true);
+    m_default_object_config.option("mixed_filament_height_lower_bound", true);
+    m_default_object_config.option("mixed_filament_height_upper_bound", true);
+    m_default_object_config.option("mixed_filament_cycle_layers", true);
+    m_default_object_config.option("mixed_filament_advanced_dithering", true);
+    m_default_object_config.option("mixed_filament_definitions", true);
     // BBS
     std::vector <unsigned int> used_filaments = this->extruders(true);
     std::unordered_set <unsigned int> used_filament_set(used_filaments.begin(), used_filaments.end());

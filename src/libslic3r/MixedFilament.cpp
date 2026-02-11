@@ -1289,19 +1289,6 @@ unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
         return mf.component_a;
     }
 
-    const bool use_simple_mode = mf.distribution_mode == int(MixedFilament::Simple);
-    const std::vector<unsigned int> gradient_ids = decode_gradient_component_ids(mf.gradient_component_ids, num_physical);
-    if (!use_simple_mode && gradient_ids.size() >= 3) {
-        const std::vector<int> gradient_weights =
-            decode_gradient_component_weights(mf.gradient_component_weights, gradient_ids.size());
-        const std::vector<unsigned int> gradient_sequence = build_weighted_gradient_sequence(
-            gradient_ids, gradient_weights.empty() ? std::vector<int>(gradient_ids.size(), 1) : gradient_weights);
-        if (!gradient_sequence.empty()) {
-            const size_t pos = size_t(safe_mod(layer_index, int(gradient_sequence.size())));
-            return gradient_sequence[pos];
-        }
-    }
-
     // Height-weighted cadence can be forced by the local-Z planner. The
     // regular gradient height mode keeps historical behavior (custom rows).
     const bool use_height_weighted = force_height_weighted || (m_gradient_mode == 1 && mf.custom);
