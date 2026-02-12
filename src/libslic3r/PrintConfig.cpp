@@ -4694,16 +4694,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    def = this->add("mixed_filament_fast_toolchange", coBool);
-    def->label = L("Fast toolchange for mixed filaments");
-    def->category = L("Others");
-    def->tooltip = L("When enabled, tool changes during the Local-Z dithering sub-pass bypass the full "
-                     "toolchange macro and emit a direct extruder switch. "
-                     "Intended for IDEX printers or tool-changers where the macro overhead is unnecessary. "
-                     "Disable on single-nozzle printers that require purging between colours.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
     def = this->add("mixed_filament_pointillism_pixel_size", coFloat);
     def->label = L("Pointillisme pixel size");
     def->category = L("Others");
@@ -4717,20 +4707,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("mixed_filament_pointillism_line_gap", coFloat);
     def->label = L("Pointillisme line gap");
     def->category = L("Others");
-    def->tooltip = L("Optional non-extruded spacing between adjacent pointillisme segments.");
+    def->tooltip = L("Optional non-extruded spacing between adjacent pointillisme segments. "
+                     "Increase carefully to improve separation and print quality.");
     def->sidetext = "mm";
     def->min = 0.;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("mixed_filament_surface_indentation", coFloat);
-    def->label = L("Selective Expansion contraction");
-    def->category = L("Others");
-    def->tooltip = L("XY offset applied to mixed-filament painted regions before region assignment. "
-                     "Positive values contract the mixed zone inward. Negative values expand it outward.");
-    def->sidetext = "mm";
-    def->min = -2.0;
-    def->max = 2.0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.0));
 

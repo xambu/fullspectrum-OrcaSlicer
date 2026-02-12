@@ -1941,7 +1941,6 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
          opt_key == "mixed_filament_advanced_dithering" ||
          opt_key == "mixed_filament_pointillism_pixel_size" ||
          opt_key == "mixed_filament_pointillism_line_gap" ||
-         opt_key == "mixed_filament_surface_indentation" ||
          opt_key == "dithering_z_step_size" ||
          opt_key == "dithering_local_z_mode" ||
          opt_key == "dithering_step_painted_zones_only" ||
@@ -2716,6 +2715,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("mixed_filament_height_upper_bound");
         optgroup->append_single_option_line("mixed_filament_cycle_layers");
         optgroup->append_single_option_line("mixed_filament_advanced_dithering");
+        optgroup->append_single_option_line("mixed_filament_pointillism_pixel_size");
+        optgroup->append_single_option_line("mixed_filament_pointillism_line_gap");
         optgroup->append_single_option_line("dithering_z_step_size");
         optgroup->append_single_option_line("dithering_local_z_mode");
         optgroup->append_single_option_line("dithering_step_painted_zones_only");

@@ -74,9 +74,11 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
         const int ratio_b = std::max(1, int(std::lround((layer_height_b > 0.f ? layer_height_b : safe_base) / safe_base)));
         const int cycle   = ratio_a + ratio_b;
 
-        if (cycle > 0 && mixed_row != nullptr) {
-            const int pos = ((layer_index % cycle) + cycle) % cycle;
-            return pos < ratio_a ? mixed_row->component_a : mixed_row->component_b;
+        if (cycle > 0) {
+            if (mixed_row != nullptr) {
+                const int pos = ((layer_index % cycle) + cycle) % cycle;
+                return pos < ratio_a ? mixed_row->component_a : mixed_row->component_b;
+            }
         }
     }
 
