@@ -111,16 +111,10 @@ public:
     }
 
     std::string prime(GCode &gcodegen);
-    void next_layer() {
-        ++ m_layer_idx;
-        m_tool_change_idx = 0;
-        if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_reserve_slot_idx.size())
-            m_local_z_reserve_slot_idx[size_t(m_layer_idx)] = 0;
-    }
+    void next_layer() { ++ m_layer_idx; m_tool_change_idx = 0; }
     // If local_z_unplanned is true, emit a wipe/toolchange without consuming the preplanned
     // per-layer wipe-tower sequence (used by Local-Z phase-b extra toolchanges).
-    std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer,
-                            bool local_z_unplanned = false, double local_z_nominal_layer_z = -1.);
+    std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer, bool local_z_unplanned = false);
     bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
     std::string finalize(GCode &gcodegen);
     std::vector<float> used_filament_length() const;
