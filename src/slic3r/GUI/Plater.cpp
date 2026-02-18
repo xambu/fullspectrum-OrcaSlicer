@@ -5168,6 +5168,42 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         }
         return blended;
     };
+    auto build_entry_preview_sequence = [decode_manual_pattern_ids, decode_gradient_ids, decode_gradient_weights,
+                                         build_weighted_multi_sequence, build_weighted_pair_sequence](const MixedFilament &entry) {
+        const std::string normalized_pattern = MixedFilamentManager::normalize_manual_pattern(entry.manual_pattern);
+        if (!normalized_pattern.empty())
+            return decode_manual_pattern_ids(normalized_pattern, entry.component_a, entry.component_b);
+
+        const bool simple_mode = entry.distribution_mode == int(MixedFilament::Simple);
+        if (!simple_mode) {
+            const std::vector<unsigned int> gradient_ids = decode_gradient_ids(entry.gradient_component_ids);
+            if (gradient_ids.size() >= 3) {
+                const std::vector<int> gradient_weights =
+                    decode_gradient_weights(entry.gradient_component_weights, gradient_ids.size());
+                return build_weighted_multi_sequence(gradient_ids, gradient_weights);
+            }
+        }
+
+        return build_weighted_pair_sequence(entry.component_a, entry.component_b, std::clamp(entry.mix_b_percent, 0, 100));
+    };
+    auto compute_entry_display_color = [num_physical, &physical_colors, blend_from_sequence, build_entry_preview_sequence](const MixedFilament &entry) {
+        const std::vector<unsigned int> sequence = build_entry_preview_sequence(entry);
+        if (!sequence.empty())
+            return blend_from_sequence(physical_colors, sequence, "#26A69A");
+
+        if (entry.component_a == 0 || entry.component_b == 0 ||
+            entry.component_a > num_physical || entry.component_b > num_physical ||
+            entry.component_a > physical_colors.size() || entry.component_b > physical_colors.size()) {
+            return std::string("#26A69A");
+        }
+
+        const int mix_b = std::clamp(entry.mix_b_percent, 0, 100);
+        return MixedFilamentManager::blend_color(
+            physical_colors[entry.component_a - 1],
+            physical_colors[entry.component_b - 1],
+            100 - mix_b,
+            mix_b);
+    };
 
     const bool height_weighted_mode = get_mixed_mode(false);
     int   gradient_mode = height_weighted_mode ? 1 : 0;
@@ -6081,10 +6117,6 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         const std::string synced_color = compute_entry_display_color(mf);
         if (mf.display_color != synced_color)
             mf.display_color = synced_color;
-        auto *drag_handle = new MixedFilamentDragHandle(header_panel, mixed_summary_fg, mixed_row_bg);
-        drag_handle->SetToolTip(_L("Drag to reorder mixed filaments in this panel."));
-        header_sizer->Add(drag_handle, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, compact_gap_x);
-
         wxColour swatch_color = parse_mixed_color(mf.display_color);
         auto *swatch = new wxPanel(header_panel, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(12), FromDIP(12)));
         swatch->SetBackgroundColour(swatch_color);
