@@ -1096,6 +1096,36 @@ static inline void compute_local_z_gradient_component_heights(int mix_b_percent,
     h_b = lo + pct_b * (hi - lo);
 }
 
+static bool choose_local_z_start_with_component_a(const std::vector<double> &pass_heights,
+                                                  double                     expected_h_a,
+                                                  double                     expected_h_b,
+                                                  size_t                     cadence_index)
+{
+    double err_ab = 0.0;
+    double err_ba = 0.0;
+    for (size_t pass_i = 0; pass_i < pass_heights.size(); ++pass_i) {
+        const double expected_ab = (pass_i % 2) == 0 ? expected_h_a : expected_h_b;
+        const double expected_ba = (pass_i % 2) == 0 ? expected_h_b : expected_h_a;
+        err_ab += std::abs(pass_heights[pass_i] - expected_ab);
+        err_ba += std::abs(pass_heights[pass_i] - expected_ba);
+    }
+
+    if (err_ab + 1e-6 < err_ba)
+        return true;
+    if (err_ba + 1e-6 < err_ab)
+        return false;
+
+    // When the requested component heights are equal (for example 50/50),
+    // either A/B or B/A is numerically identical. Preserve the existing
+    // row cadence so equal-split layers keep the normal local-Z A/B/A/B
+    // sequence instead of flipping AB|BA between nominal layers.
+    if (std::abs(expected_h_a - expected_h_b) <= 1e-6) {
+        return (cadence_index % 2) == 0;
+    }
+
+    return expected_h_a >= expected_h_b;
+}
+
 static std::vector<double> build_local_z_alternating_pass_heights(double base_height,
                                                                    double lower_bound,
                                                                    double upper_bound,
@@ -2056,16 +2086,177 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                     if (state_masks.empty())
                         continue;
 
-                    const unsigned int state_id = unsigned(channel_idx + 1);
-                    if (!mixed_mgr.is_mixed(state_id, num_physical))
-                        continue;
-                    ++forced_height_resolve_calls;
-                    const int mixed_idx = mixed_mgr.mixed_index_from_filament_id(state_id, num_physical);
-                    if (mixed_idx < 0 || size_t(mixed_idx) >= mixed_rows.size() || !mixed_rows[size_t(mixed_idx)].custom)
-                        ++forced_height_resolve_non_custom_calls;
-                    unsigned int target_extruder = 0;
-                    if (mixed_idx >= 0 && size_t(mixed_idx) < mixed_rows.size()) {
+                    const MixedFilament &mf = mixed_rows[row_idx];
+                    const std::vector<double> &row_passes_raw = isolated_row_pass_heights[row_idx];
+                    const std::vector<double> row_passes = row_passes_raw.empty()
+                        ? std::vector<double>{ interval.base_height }
+                        : row_passes_raw;
+                    const bool valid_pair = mf.component_a > 0 && mf.component_a <= num_physical &&
+                                            mf.component_b > 0 && mf.component_b <= num_physical;
+
+                    bool start_with_a = true;
+                    if (valid_pair && preferred_a <= EPSILON && preferred_b <= EPSILON) {
+                        double row_h_a = 0.0;
+                        double row_h_b = 0.0;
+                        compute_local_z_gradient_component_heights(mf.mix_b_percent, mixed_lower, mixed_upper, row_h_a, row_h_b);
+                        start_with_a = choose_local_z_start_with_component_a(row_passes,
+                                                                             row_h_a,
+                                                                             row_h_b,
+                                                                             row_cadence_index[row_idx]);
+                    }
+
+                    double z_cursor = interval.z_lo;
+                    for (size_t pass_i = 0; pass_i < row_passes.size(); ++pass_i) {
+                        if (z_cursor >= interval.z_hi - EPSILON)
+                            break;
+
+                        const double pass_height = std::min<double>(row_passes[pass_i], interval.z_hi - z_cursor);
+                        if (pass_height <= EPSILON)
+                            continue;
+                        const double z_next = std::min<double>(interval.z_hi, z_cursor + pass_height);
+
+                        SubLayerPlan plan;
+                        plan.layer_id       = layer_id;
+                        plan.pass_index     = isolated_plans.size();
+                        plan.split_interval = true;
+                        plan.z_lo           = z_cursor;
+                        plan.z_hi           = z_next;
+                        plan.print_z        = z_next;
+                        plan.flow_height    = pass_height;
+                        plan.painted_masks_by_extruder.assign(num_physical, ExPolygons());
+                        ++split_passes_total;
+                        ++forced_height_resolve_calls;
+
+                        unsigned int target_extruder = 0;
+                        if (valid_pair) {
+                            const bool even_pass = (pass_i % 2) == 0;
+                            target_extruder = even_pass
+                                ? (start_with_a ? mf.component_a : mf.component_b)
+                                : (start_with_a ? mf.component_b : mf.component_a);
+                            ++strict_ab_assignments;
+                        }
+                        if (target_extruder == 0) {
+                            const unsigned int state_id = row_state_ids[row_idx];
+                            if (state_id != 0) {
+                                target_extruder = mixed_mgr.resolve(state_id,
+                                                                    num_physical,
+                                                                    row_cadence_index[row_idx],
+                                                                    float(plan.print_z),
+                                                                    float(plan.flow_height),
+                                                                    force_height_resolve);
+                            }
+                        }
+                        if (target_extruder == 0 || target_extruder > num_physical) {
+                            ++forced_height_resolve_invalid_target;
+                        } else {
+                            append(plan.painted_masks_by_extruder[target_extruder - 1], state_masks);
+                            ++split_passes_with_painted_masks;
+                            interval_has_split_painted_masks = true;
+                        }
+
+                        isolated_plans.emplace_back(std::move(plan));
+                        ++row_cadence_index[row_idx];
+                        z_cursor = z_next;
+                    }
+                }
+
+                if (!isolated_plans.empty()) {
+                    std::sort(isolated_plans.begin(), isolated_plans.end(), [](const SubLayerPlan &lhs, const SubLayerPlan &rhs) {
+                        if (std::abs(lhs.print_z - rhs.print_z) > EPSILON)
+                            return lhs.print_z < rhs.print_z;
+                        if (std::abs(lhs.z_lo - rhs.z_lo) > EPSILON)
+                            return lhs.z_lo < rhs.z_lo;
+                        return lhs.pass_index < rhs.pass_index;
+                    });
+                    double min_flow_height = isolated_plans.front().flow_height;
+                    double max_flow_height = isolated_plans.front().flow_height;
+                    for (size_t idx = 0; idx < isolated_plans.size(); ++idx) {
+                        isolated_plans[idx].pass_index = idx;
+                        min_flow_height = std::min(min_flow_height, isolated_plans[idx].flow_height);
+                        max_flow_height = std::max(max_flow_height, isolated_plans[idx].flow_height);
+                    }
+                    isolated_plans.back().base_masks = base_masks;
+                    interval.sublayer_height = min_flow_height;
+                    pass_count_for_log       = isolated_plans.size();
+                    pass_min_height_for_log  = min_flow_height;
+                    pass_max_height_for_log  = max_flow_height;
+                    for (SubLayerPlan &plan : isolated_plans) {
+                        plans.emplace_back(std::move(plan));
+                        ++interval.sublayer_count;
+                        ++total_generated_sublayer_cnt;
+                    }
+                }
+            } else {
+                // Derive per-row orientation against pass heights so each mixed row
+                // maps thicker/thinner subpasses to the intended component.
+                std::vector<uint8_t> start_with_component_a(mixed_rows.size(), uint8_t(1));
+                if (preferred_a <= EPSILON && preferred_b <= EPSILON) {
+                    for (size_t channel_idx = 0; channel_idx < segmentation[layer_id].size(); ++channel_idx) {
+                        const ExPolygons &state_masks = segmentation[layer_id][channel_idx];
+                        if (state_masks.empty())
+                            continue;
+
+                        const unsigned int state_id = unsigned(channel_idx + 1);
+                        if (!mixed_mgr.is_mixed(state_id, num_physical))
+                            continue;
+                        const int mixed_idx = mixed_mgr.mixed_index_from_filament_id(state_id, num_physical);
+                        if (mixed_idx < 0 || size_t(mixed_idx) >= mixed_rows.size())
+                            continue;
                         const MixedFilament &mf = mixed_rows[size_t(mixed_idx)];
+                        if (!local_z_eligible_mixed_row(mf))
+                            continue;
+
+                        double row_h_a = 0.0;
+                        double row_h_b = 0.0;
+                        compute_local_z_gradient_component_heights(mf.mix_b_percent, mixed_lower, mixed_upper, row_h_a, row_h_b);
+                        start_with_component_a[size_t(mixed_idx)] =
+                            choose_local_z_start_with_component_a(pass_heights,
+                                                                  row_h_a,
+                                                                  row_h_b,
+                                                                  row_cadence_index[size_t(mixed_idx)]) ? uint8_t(1) : uint8_t(0);
+                    }
+                }
+
+                double z_cursor = interval.z_lo;
+                size_t pass_idx = 0;
+                interval.sublayer_height = *std::min_element(pass_heights.begin(), pass_heights.end());
+                for (const double pass_height_nominal : pass_heights) {
+                    if (z_cursor >= interval.z_hi - EPSILON)
+                        break;
+                    const double pass_height = std::min<double>(pass_height_nominal, interval.z_hi - z_cursor);
+                    const double z_next      = std::min<double>(interval.z_hi, z_cursor + pass_height);
+
+                    SubLayerPlan plan;
+                    plan.layer_id       = layer_id;
+                    plan.pass_index     = pass_idx;
+                    plan.split_interval = true;
+                    plan.z_lo           = z_cursor;
+                    plan.z_hi           = z_next;
+                    plan.print_z        = z_next;
+                    plan.flow_height    = pass_height;
+                    plan.painted_masks_by_extruder.assign(num_physical, ExPolygons());
+                    ++split_passes_total;
+                    bool pass_has_painted_masks = false;
+                    std::vector<uint8_t> row_seen_in_pass(mixed_rows.size(), uint8_t(0));
+
+                    for (size_t channel_idx = 0; channel_idx < segmentation[layer_id].size(); ++channel_idx) {
+                        const ExPolygons &state_masks = segmentation[layer_id][channel_idx];
+                        if (state_masks.empty())
+                            continue;
+
+                        const unsigned int state_id = unsigned(channel_idx + 1);
+                        if (!mixed_mgr.is_mixed(state_id, num_physical))
+                            continue;
+                        const int mixed_idx = mixed_mgr.mixed_index_from_filament_id(state_id, num_physical);
+                        if (mixed_idx < 0 || size_t(mixed_idx) >= mixed_rows.size())
+                            continue;
+                        const size_t row_idx = size_t(mixed_idx);
+                        const MixedFilament &mf = mixed_rows[row_idx];
+                        if (!local_z_eligible_mixed_row(mf))
+                            continue;
+                        row_seen_in_pass[row_idx] = uint8_t(1);
+                        ++forced_height_resolve_calls;
+                        unsigned int target_extruder = 0;
                         if (mf.component_a > 0 && mf.component_a <= num_physical &&
                             mf.component_b > 0 && mf.component_b <= num_physical) {
                             // Enforce strict per-pass alternation inside split local-Z intervals.
