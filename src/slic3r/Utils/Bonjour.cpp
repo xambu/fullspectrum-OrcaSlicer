@@ -19,6 +19,26 @@ namespace endian = boost::endian;
 namespace asio = boost::asio;
 using boost::asio::ip::udp;
 
+namespace {
+
+void quarantine_socket(udp::socket& socket, bool& socket_usable, const char* action, const std::exception& e)
+{
+#ifdef __APPLE__
+	socket_usable = false;
+	boost::system::error_code ec;
+	socket.cancel(ec);
+	socket.close(ec);
+	BOOST_LOG_TRIVIAL(error) << action << ": " << e.what();
+#else
+	(void) socket;
+	(void) socket_usable;
+	(void) action;
+	BOOST_LOG_TRIVIAL(error) << e.what();
+#endif
+}
+
+}
+
 
 namespace Slic3r {
 
@@ -649,7 +669,7 @@ UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multica
 		BOOST_LOG_TRIVIAL(info) << "Socket created. Multicast: " << multicast_address << ". Interface: " << interface_address;
 	}
 	catch (std::exception& e) {
-		BOOST_LOG_TRIVIAL(error) << e.what();
+		quarantine_socket(socket, m_socket_usable, "UdpSocket setup failed", e);
 	}
 }
 
@@ -673,12 +693,42 @@ UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multica
 		BOOST_LOG_TRIVIAL(info) << "Socket created. Multicast: " << multicast_address;
 	}
 	catch (std::exception& e) {
-		BOOST_LOG_TRIVIAL(error) << e.what();
+		quarantine_socket(socket, m_socket_usable, "UdpSocket setup failed", e);
 	}
+}
+
+UdpSocket::~UdpSocket()
+{
+	try {
+		// 取消所有异步操作
+		socket.cancel();
+		
+		// 关闭socket
+		if (socket.is_open()) {
+			socket.close();
+		}
+		
+		BOOST_LOG_TRIVIAL(debug) << "UdpSocket destroyed, socket closed";
+	}
+	catch (const std::exception& e) {
+		BOOST_LOG_TRIVIAL(error) << "Error closing socket in destructor: " << e.what();
+	}
+}
+
+void UdpSocket::cancel()
+{
+	if (!m_socket_usable)
+		return;
+
+	boost::system::error_code ec;
+	socket.cancel(ec);
 }
 
 void UdpSocket::send()
 {
+	if (!m_socket_usable)
+		return;
+
 	try {
 		for (const auto& request : requests)
 			socket.send_to(asio::buffer(request.m_data), mcast_endpoint);
@@ -687,12 +737,15 @@ void UdpSocket::send()
 		async_receive();
 	}
 	catch (std::exception& e) {
-		BOOST_LOG_TRIVIAL(error) << e.what();
+		quarantine_socket(socket, m_socket_usable, "UdpSocket send failed", e);
 	}
 }
 
 void UdpSocket::async_receive()
 {
+	if (!m_socket_usable)
+		return;
+
 	try {
 		// our session to hold the buffer + endpoint
 		auto session = create_session();
@@ -701,12 +754,15 @@ void UdpSocket::async_receive()
 			, boost::bind(&UdpSocket::receive_handler, this, session, asio::placeholders::error, asio::placeholders::bytes_transferred));
 	}
 	catch (std::exception& e) {
-		BOOST_LOG_TRIVIAL(error) << e.what();
+		quarantine_socket(socket, m_socket_usable, "UdpSocket receive setup failed", e);
 	}
 }
 
 void UdpSocket::receive_handler(SharedSession session, const boost::system::error_code& error, size_t bytes)
 {
+	if (!m_socket_usable)
+		return;
+
 	// let io_service to handle the datagram on session
 	// from boost documentation io_service::post:
 	// The io_service guarantees that the handler will only be called in a thread in which the run(), run_one(), poll() or poll_one() member functions is currently being invoked.
@@ -948,6 +1004,17 @@ void Bonjour::priv::lookup_perform()
 	catch (std::exception& e) {
 		BOOST_LOG_TRIVIAL(error) << e.what();
 	}
+	
+	// 清理sockets，释放内存
+	for (auto* socket : sockets) {
+		if (socket) {
+			// 先取消所有异步操作
+			socket->cancel();
+			// 然后释放内存
+			delete socket;
+		}
+	}
+	sockets.clear();
 }
 
 void Bonjour::priv::resolve_perform()
@@ -1042,6 +1109,17 @@ void Bonjour::priv::resolve_perform()
 	catch (std::exception& e) {
 		BOOST_LOG_TRIVIAL(error) << e.what();
 	}
+	
+	// 清理sockets，释放内存
+	for (auto* socket : sockets) {
+		if (socket) {
+			// 先取消所有异步操作
+			socket->cancel();
+			// 然后释放内存
+			delete socket;
+		}
+	}
+	sockets.clear();
 }
 
 
@@ -1114,7 +1192,14 @@ Bonjour::Bonjour(Bonjour &&other) : p(std::move(other.p)) {}
 Bonjour::~Bonjour()
 {
 	if (p && p->io_thread.joinable()) {
-		p->io_thread.detach();
+		// 检查是否在同一个线程中，避免死锁
+		if (p->io_thread.get_id() != std::this_thread::get_id()) {
+			// 等待线程完成，确保资源正确清理
+			p->io_thread.join();
+		} else {
+			// 如果在同一个线程中，使用detach避免死锁
+			p->io_thread.detach();
+		}
 	}
 }
 
