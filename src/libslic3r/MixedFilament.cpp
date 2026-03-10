@@ -1114,19 +1114,13 @@ void MixedFilamentManager::load_custom_entries(const std::string              &s
         }
 
         if (!custom) {
-            auto it_auto = std::find_if(m_mixed.begin(), m_mixed.end(), [a, b](const MixedFilament &mf) {
-                return !mf.custom && mf.component_a == a && mf.component_b == b;
-            });
-            if (it_auto != m_mixed.end()) {
-                it_auto->enabled = enabled;
-                it_auto->pointillism_all_filaments = pointillism_all_filaments;
-                it_auto->gradient_component_ids = normalize_gradient_component_ids(gradient_component_ids);
-                it_auto->gradient_component_weights =
-                    normalize_gradient_component_weights(gradient_component_weights, it_auto->gradient_component_ids.size());
-                it_auto->manual_pattern = normalize_manual_pattern(manual_pattern);
-                it_auto->distribution_mode = clamp_int(distribution_mode, int(MixedFilament::LayerCycle), int(MixedFilament::Simple));
-                it_auto->mix_b_percent = it_auto->manual_pattern.empty() ? mix : mix_percent_from_normalized_pattern(it_auto->manual_pattern);
-                ++updated_auto;
+            const uint64_t key = canonical_pair_key(a, b);
+            if (consumed_auto_pairs.count(key) != 0) {
+                ++skipped_rows;
+                BOOST_LOG_TRIVIAL(warning) << "MixedFilamentManager::load_custom_entries duplicate auto row"
+                                           << ", row=" << row
+                                           << ", a=" << std::min(a, b)
+                                           << ", b=" << std::max(a, b);
                 continue;
             }
 

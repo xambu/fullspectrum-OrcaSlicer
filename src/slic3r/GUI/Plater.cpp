@@ -494,6 +494,8 @@ struct Sidebar::priv
     Button*             m_btn_ks_solver = nullptr;               // KS color solver button
     Button*             m_btn_toggle_mixed_filaments = nullptr;   // Collapse/expand toggle button
     bool                m_mixed_filaments_collapsed = false;      // Collapse state
+    bool                m_skip_mixed_filament_sync_once = false;  // Local edits already mutated manager in place.
+    std::unordered_set<size_t> m_expanded_mixed_filament_rows;    // Expanded row editors
     wxStaticLine* m_staticline2;
     wxPanel* m_panel_project_title;
     ScalableButton* m_filament_icon = nullptr;
@@ -6068,7 +6070,7 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
 
         if (rebuild_virtual_id_remap && wxGetApp().plater()) {
             p->m_skip_mixed_filament_sync_once = true;
-            wxGetApp().plater()->on_filament_count_change(num_physical);
+            wxGetApp().plater()->on_filaments_change(num_physical);
         }
     };
 
@@ -6223,7 +6225,7 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
                          wxGetApp().plater()->update_project_dirty_from_presets();
                      if (wxGetApp().plater()) {
                          p->m_skip_mixed_filament_sync_once = true;
-                         wxGetApp().plater()->on_filament_count_change(num_physical);
+                         wxGetApp().plater()->on_filaments_change(num_physical);
                      }
                  }
              }
