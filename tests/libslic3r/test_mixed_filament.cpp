@@ -664,24 +664,63 @@ TEST_CASE("predict_mixed_color weights need not sum to 100", "[MixedFilament][KS
 
 TEST_CASE("predict_mixed_color TD-weighted path differs from RGB-only path", "[MixedFilament][KS][TD]")
 {
-    // Red td1s=2.0 + Blue td1s=2.0 at 50/50.
-    // opacity = 1 - exp(-2.0) ≈ 0.865 — scales down K/S contributions.
-    // The result should differ from the RGB-only path.
+    // Light gray + dark gray at 50/50 with td1s=2.0 at default layer_height=1.0mm.
+    // Beer–Lambert: opacity = 1 - exp(-1.0 / 2.0) = 1 - exp(-0.5) ≈ 0.393
+    // TD path scales K/S down → lighter result than the unscaled RGB-only path.
+    // Pure saturated colours (e.g. #FF0000 + #0000FF) both map to near-black in K/S
+    // space and aren't suitable for this test; moderate grays are used instead.
     const std::string td_result = predict_mixed_color({
-        {"#FF0000", 50, 2.0f},
-        {"#0000FF", 50, 2.0f}
+        {"#AAAAAA", 50, 2.0f},
+        {"#555555", 50, 2.0f}
     });
     const std::string rgb_result = predict_mixed_color({
-        {"#FF0000", 50, 0.0f},
-        {"#0000FF", 50, 0.0f}
+        {"#AAAAAA", 50, 0.0f},
+        {"#555555", 50, 0.0f}
     });
     // Both must be valid hex colors.
     REQUIRE(td_result.size() == 7);
     REQUIRE(td_result[0] == '#');
     REQUIRE(rgb_result.size() == 7);
     REQUIRE(rgb_result[0] == '#');
-    // TD path uses scaled K/S; results should differ from unscaled K/S.
+    // TD-scaled K/S produces a lighter blend than unscaled K/S — results must differ.
     CHECK(td_result != rgb_result);
+}
+
+TEST_CASE("predict_mixed_color TD-weighted path scales with layer_height", "[MixedFilament][KS][TD]")
+{
+    // Same pair of moderate-gray filaments, same td1s=1mm, but different layer heights.
+    // Beer–Lambert: opacity = 1 - exp(-layer_height / td1s)
+    //   At 0.2mm, td1s=1: opacity = 1 - exp(-0.2) ≈ 0.181  (thin / mostly transparent)
+    //   At 1.0mm, td1s=1: opacity = 1 - exp(-1.0) ≈ 0.632  (thicker / more opaque)
+    // Thin layers absorb less → lighter result; thick layers absorb more → darker result.
+    const std::string thin_result = predict_mixed_color(
+        {{"#AAAAAA", 50, 1.0f}, {"#555555", 50, 1.0f}},
+        /*layer_height=*/0.2f);
+    const std::string thick_result = predict_mixed_color(
+        {{"#AAAAAA", 50, 1.0f}, {"#555555", 50, 1.0f}},
+        /*layer_height=*/1.0f);
+
+    REQUIRE(thin_result.size() == 7);
+    REQUIRE(thin_result[0] == '#');
+    REQUIRE(thick_result.size() == 7);
+    REQUIRE(thick_result[0] == '#');
+    // Different layer heights must produce different blended colors.
+    CHECK(thin_result != thick_result);
+}
+
+TEST_CASE("predict_mixed_color TD layer_height clamps to 1mm when zero", "[MixedFilament][KS][TD]")
+{
+    // layer_height=0 should clamp to 1mm (same as default 1.0mm call).
+    const std::string zero_h  = predict_mixed_color(
+        {{"#AAAAAA", 50, 1.0f}, {"#555555", 50, 1.0f}},
+        /*layer_height=*/0.f);
+    const std::string one_mm  = predict_mixed_color(
+        {{"#AAAAAA", 50, 1.0f}, {"#555555", 50, 1.0f}},
+        /*layer_height=*/1.0f);
+
+    REQUIRE(zero_h.size() == 7);
+    REQUIRE(zero_h[0] == '#');
+    CHECK(zero_h == one_mm);
 }
 
 TEST_CASE("predict_mixed_color falls back to RGB-only when one component lacks TD", "[MixedFilament][KS][TD]")

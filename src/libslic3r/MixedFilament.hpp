@@ -26,12 +26,15 @@ struct FilamentColorDef
 // Kubelka-Munk K/S model.  Works for 2 or more components.
 //
 // If ALL components have td1s > 0 the TD-weighted K/S pipeline is used:
-//   K/S_eff = K/S_rgb * (1 - exp(-td1s))   (per channel, nominal 1 mm)
+//   opacity = 1 - exp(-layer_height / td1s)   (Beer–Lambert per channel)
+//   K/S_eff = K/S_rgb * opacity
 // Otherwise the simpler RGB-only K/S path is taken.
 //
+// layer_height is in mm (default 1.0 mm = nominal HueForge reference).
 // weights need not sum to 100 — they are normalized internally.
 // Returns "#RRGGBB".
-std::string predict_mixed_color(const std::vector<FilamentColorDef> &components);
+std::string predict_mixed_color(const std::vector<FilamentColorDef> &components,
+                                float layer_height = 1.f);
 
 // Represents a virtual "mixed" filament created from physical filaments
 // (layer cadence and/or same-layer interleaved stripe distribution). Display

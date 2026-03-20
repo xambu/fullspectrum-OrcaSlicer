@@ -1560,16 +1560,22 @@ std::vector<std::string> MixedFilamentManager::display_colors() const
 // ---------------------------------------------------------------------------
 // TD-weighted K/S blend (HueForge / filament TD data)
 // ---------------------------------------------------------------------------
-// opacity_factor(td1s) = 1 - exp(-td1s)
-// At td1s=0: fully transmissive (no K/S effect) — clamped to 1 for RGB-only path.
-// At td1s=2: 1 - exp(-2) ≈ 0.865.
-// At td1s≥5: effectively fully opaque.
-static std::string blend_color_ks_td_impl(const std::vector<FilamentColorDef> &components)
+// Beer–Lambert transmittance per channel:
+//   T = exp(-layer_height / td1s)   where td1s is the Transmission Distance in mm
+//   opacity = 1 - T
+//
+// At layer_height=0.2 mm, td1s=1 mm: opacity = 1 - exp(-0.2) ≈ 0.18  (thin, mostly transparent)
+// At layer_height=1.0 mm, td1s=1 mm: opacity = 1 - exp(-1.0) ≈ 0.63  (nominal HueForge reference)
+// At layer_height=1.0 mm, td1s=5 mm: opacity = 1 - exp(-0.2) ≈ 0.18  (very transparent material)
+static std::string blend_color_ks_td_impl(const std::vector<FilamentColorDef> &components,
+                                          float layer_height)
 {
     if (components.empty())
         return "#000000";
     if (components.size() == 1)
         return components.front().hex_color;
+
+    const float h = (layer_height > 1e-6f) ? layer_height : 1.f;
 
     int total_pct = 0;
     for (const auto &c : components)
@@ -1582,9 +1588,10 @@ static std::string blend_color_ks_td_impl(const std::vector<FilamentColorDef> &c
         const int w = std::max(0, c.weight);
         if (w == 0)
             continue;
-        const float weight     = static_cast<float>(w) / static_cast<float>(total_pct);
-        const float opacity    = (c.td1s > 0.f) ? clamp01(1.f - std::exp(-c.td1s)) : 1.f;
-        const RGB   rgb        = parse_hex_color(c.hex_color);
+        const float weight  = static_cast<float>(w) / static_cast<float>(total_pct);
+        // Beer–Lambert: opacity = 1 - exp(-h / td)
+        const float opacity = (c.td1s > 0.f) ? clamp01(1.f - std::exp(-h / c.td1s)) : 1.f;
+        const RGB   rgb     = parse_hex_color(c.hex_color);
         ks_r += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.r) / 255.f)) * opacity;
         ks_g += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.g) / 255.f)) * opacity;
         ks_b += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.b) / 255.f)) * opacity;
@@ -1602,7 +1609,8 @@ static std::string blend_color_ks_td_impl(const std::vector<FilamentColorDef> &c
 // Public K/S API
 // ---------------------------------------------------------------------------
 
-std::string predict_mixed_color(const std::vector<FilamentColorDef> &components)
+std::string predict_mixed_color(const std::vector<FilamentColorDef> &components,
+                                float layer_height)
 {
     // Use TD-weighted path when ALL components have a valid TD value.
     bool all_have_td = !components.empty();
@@ -1614,7 +1622,7 @@ std::string predict_mixed_color(const std::vector<FilamentColorDef> &components)
     }
 
     if (all_have_td)
-        return blend_color_ks_td_impl(components);
+        return blend_color_ks_td_impl(components, layer_height);
 
     // Fall back to RGB-only K/S.
     std::vector<std::pair<std::string, int>> color_percents;

@@ -19337,8 +19337,17 @@ void Plater::on_activate()
 // Get vector of extruder colors considering filament color, if extruder color is undefined.
 std::vector<std::string> Plater::get_extruder_colors_from_plater_config(const GCodeProcessorResult* const result, bool include_mixed) const
 {
-    if (wxGetApp().is_gcode_viewer() && result != nullptr)
-        return result->extruder_colors;
+    if (wxGetApp().is_gcode_viewer() && result != nullptr) {
+        // In gcode-viewer mode extruder_colors holds physical filament colors only.
+        // Append mixed filament blend colors so the legend shows virtual tools.
+        std::vector<std::string> colors = result->extruder_colors;
+        if (include_mixed && wxGetApp().preset_bundle != nullptr) {
+            const auto& mixed_mgr = wxGetApp().preset_bundle->mixed_filaments;
+            for (const auto& dc : mixed_mgr.display_colors())
+                colors.push_back(dc);
+        }
+        return colors;
+    }
     else {
         if (wxGetApp().preset_bundle == nullptr)
             return {};

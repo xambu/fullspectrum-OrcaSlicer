@@ -1474,6 +1474,12 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         auto emit_local_z_unplanned_toolchange = [&]() -> std::string {
             if (extruder_id < 0 || !gcodegen.writer().need_toolchange(extruder_id))
                 return "";
+            // Fast path: direct Tn for IDEX / tool-changers — skips reserve purge.
+            if (gcodegen.config().mixed_filament_fast_toolchange.value) {
+                BOOST_LOG_TRIVIAL(debug) << "Local-Z unplanned toolchange: fast_toolchange enabled"
+                                         << " — direct switch, extruder_id=" << extruder_id;
+                return gcodegen.writer().toolchange(unsigned(extruder_id));
+            }
             // When "flush into print" is enabled, skip the dedicated wipe-tower reserve
             // purge path.  The first extrusion of the upcoming Local-Z perimeter pass
             // absorbs the transitional material, matching the behaviour of flush_into_objects
@@ -5807,7 +5813,14 @@ LayerResult GCode::process_layer(
 
                     if (has_wipe_tower && m_writer.need_toolchange(local_extruder_id))
                         local_z_phase_b_changed_extruder = true;
-                    if (has_wipe_tower && m_wipe_tower) {
+                    if (m_config.mixed_filament_fast_toolchange.value && m_writer.need_toolchange(local_extruder_id)) {
+                        // Fast path: direct Tn switch for IDEX / tool-changers — skips wipe tower
+                        // and full macro.  Only safe when the printer handles purging internally
+                        // (e.g., IDEX park + prime tower) or when purging is not required.
+                        BOOST_LOG_TRIVIAL(debug) << "Local-Z phase-b fast toolchange"
+                                                 << " extruder=" << local_extruder_id;
+                        gcode += m_writer.toolchange(local_extruder_id);
+                    } else if (has_wipe_tower && m_wipe_tower) {
                         gcode += m_wipe_tower->tool_change(*this, int(local_extruder_id), false, true, print_z + m_config.z_offset.value);
                         m_last_processor_extrusion_role = erWipeTower;
                     } else {
