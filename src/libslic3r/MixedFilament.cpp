@@ -39,6 +39,24 @@ struct RGBf {
     return std::max(0.f, std::min(1.f, v));
 }
 
+// ---------------------------------------------------------------------------
+// Kubelka-Munk (K/S) math helpers — no dependencies on parse_hex_color etc.
+// ---------------------------------------------------------------------------
+static constexpr float k_ks_r_floor = 1e-4f;
+
+// K/S ratio from reflectance R in [0,1].  Floor avoids division by zero.
+static float rgb_to_ks(float R)
+{
+    const float r = std::max(R, k_ks_r_floor);
+    return (1.f - r) * (1.f - r) / (2.f * r);
+}
+
+// Reflectance from K/S ratio (Kubelka-Munk inversion).
+static float ks_to_rgb(float ks)
+{
+    return 1.f + ks - std::sqrt(ks * ks + 2.f * ks);
+}
+
 [[maybe_unused]] static RGBf to_rgbf(const RGB &c)
 {
     return {
@@ -162,6 +180,56 @@ static std::string rgb_to_hex(const RGB &c)
     char buf[8];
     std::snprintf(buf, sizeof(buf), "#%02X%02X%02X", c.r, c.g, c.b);
     return std::string(buf);
+}
+
+// ---------------------------------------------------------------------------
+// K/S blend functions (depend on parse_hex_color / to_rgb8 / rgb_to_hex above)
+// ---------------------------------------------------------------------------
+
+// Blend N colours with per-colour weights using Kubelka-Munk in reflectance
+// space.  color_percents: vector of (hex_color, percent) where percents ~sum 100.
+static std::string blend_color_ks_impl(const std::vector<std::pair<std::string, int>> &color_percents)
+{
+    if (color_percents.empty())
+        return "#000000";
+    if (color_percents.size() == 1)
+        return color_percents.front().first;
+
+    int total_pct = 0;
+    for (const auto &cp : color_percents)
+        total_pct += std::max(0, cp.second);
+    if (total_pct <= 0)
+        return color_percents.front().first;
+
+    float ks_r = 0.f, ks_g = 0.f, ks_b = 0.f;
+    for (const auto &cp : color_percents) {
+        const int w = std::max(0, cp.second);
+        if (w == 0)
+            continue;
+        const float weight = static_cast<float>(w) / static_cast<float>(total_pct);
+        const RGB rgb = parse_hex_color(cp.first);
+        ks_r += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.r) / 255.f));
+        ks_g += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.g) / 255.f));
+        ks_b += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.b) / 255.f));
+    }
+
+    const RGBf out = {
+        clamp01(ks_to_rgb(std::max(0.f, ks_r))),
+        clamp01(ks_to_rgb(std::max(0.f, ks_g))),
+        clamp01(ks_to_rgb(std::max(0.f, ks_b)))
+    };
+    return rgb_to_hex(to_rgb8(out));
+}
+
+// Convenience 2-component K/S blend from ratio_a:ratio_b.
+static std::string blend_color_ks_2(const std::string &color_a, const std::string &color_b,
+                                     int ratio_a, int ratio_b)
+{
+    const int sa = std::max(0, ratio_a);
+    const int sb = std::max(0, ratio_b);
+    if (sa + sb == 0)
+        return color_a;
+    return blend_color_ks_impl({{color_a, sa}, {color_b, sb}});
 }
 
 [[maybe_unused]] static std::string blend_color_ryb_legacy(const RGB &rgb_a,
@@ -1454,7 +1522,7 @@ void MixedFilamentManager::refresh_display_colors(const std::vector<std::string>
                     continue;
                 color_percents.emplace_back(filament_colours[gradient_ids[i] - 1], wi);
             }
-            mf.display_color = blend_color_multi(color_percents);
+            mf.display_color = blend_color_ks_impl(color_percents);
             continue;
         }
         if (mf.component_a == 0 || mf.component_b == 0 ||
@@ -1464,7 +1532,7 @@ void MixedFilamentManager::refresh_display_colors(const std::vector<std::string>
         }
         const int ratio_a = std::max(0, 100 - clamp_int(mf.mix_b_percent, 0, 100));
         const int ratio_b = clamp_int(mf.mix_b_percent, 0, 100);
-        mf.display_color = blend_color(
+        mf.display_color = blend_color_ks_2(
             filament_colours[mf.component_a - 1],
             filament_colours[mf.component_b - 1],
             ratio_a, ratio_b);
@@ -1487,6 +1555,73 @@ std::vector<std::string> MixedFilamentManager::display_colors() const
         if (mf.enabled && !mf.deleted)
             colors.push_back(mf.display_color);
     return colors;
+}
+
+// ---------------------------------------------------------------------------
+// TD-weighted K/S blend (HueForge / filament TD data)
+// ---------------------------------------------------------------------------
+// opacity_factor(td1s) = 1 - exp(-td1s)
+// At td1s=0: fully transmissive (no K/S effect) — clamped to 1 for RGB-only path.
+// At td1s=2: 1 - exp(-2) ≈ 0.865.
+// At td1s≥5: effectively fully opaque.
+static std::string blend_color_ks_td_impl(const std::vector<FilamentColorDef> &components)
+{
+    if (components.empty())
+        return "#000000";
+    if (components.size() == 1)
+        return components.front().hex_color;
+
+    int total_pct = 0;
+    for (const auto &c : components)
+        total_pct += std::max(0, c.weight);
+    if (total_pct <= 0)
+        return components.front().hex_color;
+
+    float ks_r = 0.f, ks_g = 0.f, ks_b = 0.f;
+    for (const auto &c : components) {
+        const int w = std::max(0, c.weight);
+        if (w == 0)
+            continue;
+        const float weight     = static_cast<float>(w) / static_cast<float>(total_pct);
+        const float opacity    = (c.td1s > 0.f) ? clamp01(1.f - std::exp(-c.td1s)) : 1.f;
+        const RGB   rgb        = parse_hex_color(c.hex_color);
+        ks_r += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.r) / 255.f)) * opacity;
+        ks_g += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.g) / 255.f)) * opacity;
+        ks_b += weight * rgb_to_ks(clamp01(static_cast<float>(rgb.b) / 255.f)) * opacity;
+    }
+
+    const RGBf out = {
+        clamp01(ks_to_rgb(std::max(0.f, ks_r))),
+        clamp01(ks_to_rgb(std::max(0.f, ks_g))),
+        clamp01(ks_to_rgb(std::max(0.f, ks_b)))
+    };
+    return rgb_to_hex(to_rgb8(out));
+}
+
+// ---------------------------------------------------------------------------
+// Public K/S API
+// ---------------------------------------------------------------------------
+
+std::string predict_mixed_color(const std::vector<FilamentColorDef> &components)
+{
+    // Use TD-weighted path when ALL components have a valid TD value.
+    bool all_have_td = !components.empty();
+    for (const auto &c : components) {
+        if (c.td1s <= 0.f) {
+            all_have_td = false;
+            break;
+        }
+    }
+
+    if (all_have_td)
+        return blend_color_ks_td_impl(components);
+
+    // Fall back to RGB-only K/S.
+    std::vector<std::pair<std::string, int>> color_percents;
+    color_percents.reserve(components.size());
+    for (const auto &c : components)
+        color_percents.emplace_back(c.hex_color, c.weight);
+    return blend_color_ks_impl(color_percents);
 }
 
 } // namespace Slic3r

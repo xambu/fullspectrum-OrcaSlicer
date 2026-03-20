@@ -9,6 +9,30 @@
 
 namespace Slic3r {
 
+// ---------------------------------------------------------------------------
+// Kubelka-Munk color prediction API
+// ---------------------------------------------------------------------------
+
+// A single pigment component with its display hex color and blending weight.
+struct FilamentColorDef
+{
+    std::string hex_color;  // "#RRGGBB"
+    int         weight;     // relative weight (e.g. mix percent)
+    float       td1s = 0.f; // HueForge/filament Transmission Distance in mm.
+                            // 0 = not set → fall back to RGB-only K/S.
+};
+
+// Predict the display color of a physical-pigment blend using the
+// Kubelka-Munk K/S model.  Works for 2 or more components.
+//
+// If ALL components have td1s > 0 the TD-weighted K/S pipeline is used:
+//   K/S_eff = K/S_rgb * (1 - exp(-td1s))   (per channel, nominal 1 mm)
+// Otherwise the simpler RGB-only K/S path is taken.
+//
+// weights need not sum to 100 — they are normalized internally.
+// Returns "#RRGGBB".
+std::string predict_mixed_color(const std::vector<FilamentColorDef> &components);
+
 // Represents a virtual "mixed" filament created from physical filaments
 // (layer cadence and/or same-layer interleaved stripe distribution). Display
 // colour blending uses FilamentMixer  so pair previews better

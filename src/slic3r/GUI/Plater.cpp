@@ -5637,6 +5637,29 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         swatch->SetMinSize(wxSize(FromDIP(12), FromDIP(12)));
         header_sizer->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, compact_gap_x);
 
+        // ● = both components have TD data; ○ = RGB-only K/S fallback.
+        {
+            auto get_filament_td1s = [&preset_bundle](unsigned int filament_1based) -> float {
+                if (!preset_bundle || filament_1based == 0) return 0.f;
+                const size_t slot = filament_1based - 1;
+                if (slot >= preset_bundle->filament_presets.size()) return 0.f;
+                const Preset *p = preset_bundle->filaments.find_preset(preset_bundle->filament_presets[slot]);
+                if (!p) return 0.f;
+                const auto *opt = p->config.option<ConfigOptionFloats>("filament_td1s");
+                return (opt && !opt->values.empty()) ? float(opt->values[0]) : 0.f;
+            };
+            const float td_a = get_filament_td1s(mf.component_a);
+            const float td_b = get_filament_td1s(mf.component_b);
+            const bool has_td = td_a > 0.f && td_b > 0.f;
+            auto *td_indicator = new wxStaticText(header_panel, wxID_ANY,
+                                                  has_td ? wxString(L"\u25CF") : wxString(L"\u25CB"));
+            td_indicator->SetForegroundColour(has_td ? wxColour(80, 160, 80) : mixed_summary_fg);
+            td_indicator->SetToolTip(has_td
+                ? _L("K/S color prediction: TD data available (accurate)")
+                : _L("K/S color prediction: RGB-only (approximate — add TD values in the filament preset editor)"));
+            header_sizer->Add(td_indicator, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, compact_gap_x);
+        }
+
         const int virtual_filament_id = int(num_physical + display_mixed_idx + 1);
         auto *name_label = new wxStaticText(header_panel, wxID_ANY, wxString::Format("Mixed Filament %d", virtual_filament_id));
         name_label->SetForegroundColour(mixed_text_fg);

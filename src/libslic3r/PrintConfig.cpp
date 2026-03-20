@@ -2742,6 +2742,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 0. });
 
+    def = this->add("filament_td1s", coFloats);
+    def->label = L("Transmission Distance (TD)");
+    def->tooltip = L("Filament transmission distance for Kubelka-Munk K/S color mixing. "
+                     "Measure with HueForge or enter from filament manufacturer data. "
+                     "Leave 0 to use RGB-only K/S mixing.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
     def = this->add("filament_settings_id", coStrings);
     def->set_default_value(new ConfigOptionStrings { "" });
     //BBS: open this option to command line
