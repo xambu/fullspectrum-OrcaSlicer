@@ -1,6 +1,7 @@
 #include "Plater.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "KSColorSolverDialog.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "libslic3r_version.h"
 
@@ -490,6 +491,7 @@ struct Sidebar::priv
     wxStaticText*       m_staticText_mixed_filaments = nullptr;
     Button*             m_btn_add_gradient = nullptr;
     Button*             m_btn_add_pattern = nullptr;
+    Button*             m_btn_ks_solver = nullptr;
     Button*             m_btn_toggle_mixed_filaments = nullptr;
     bool                m_mixed_filaments_collapsed = false;
     bool                m_skip_mixed_filament_sync_once = false;
@@ -2225,12 +2227,39 @@ Sidebar::Sidebar(Plater *parent)
         }
     });
 
+    // Create "Colour Solver…" button (K/S ratio solver / calibration dialog)
+    p->m_btn_ks_solver = new Button(p->m_panel_mixed_filaments_title, _L("Colour Solver\u2026"));
+    p->m_btn_ks_solver->SetStyle(ButtonStyle::Confirm, ButtonType::Compact);
+    p->m_btn_ks_solver->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        if (!wxGetApp().preset_bundle) return;
+        auto *preset_bundle = wxGetApp().preset_bundle;
+        // Collect physical colours
+        ConfigOptionStrings *co = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+        std::vector<std::string> colors = co ? co->values : std::vector<std::string>();
+        // Collect TD1S values from filament presets
+        std::vector<float> td1s_vals;
+        for (const std::string &fp_name : preset_bundle->filament_presets) {
+            const Preset *fp = preset_bundle->filaments.find_preset(fp_name);
+            float td = 0.f;
+            if (fp) {
+                const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
+                if (td_opt && !td_opt->values.empty())
+                    td = float(td_opt->values[0]);
+            }
+            td1s_vals.push_back(td);
+        }
+        float lh = float(preset_bundle->prints.get_edited_preset().config.opt_float("layer_height"));
+        GUI::KSColorSolverDialog dlg(this, colors, td1s_vals, lh);
+        dlg.ShowModal();
+    });
+
     // Create horizontal sizer for title bar
     wxBoxSizer* h_sizer_mixed_title = new wxBoxSizer(wxHORIZONTAL);
     h_sizer_mixed_title->Add(p->m_mixed_filaments_icon, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
     h_sizer_mixed_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
     h_sizer_mixed_title->Add(p->m_staticText_mixed_filaments, 0, wxALIGN_CENTER);
     h_sizer_mixed_title->AddStretchSpacer();
+    h_sizer_mixed_title->Add(p->m_btn_ks_solver, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::ElementSpacing()));
     h_sizer_mixed_title->Add(p->m_btn_add_gradient, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::ElementSpacing()));
     h_sizer_mixed_title->Add(p->m_btn_add_pattern, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::TitlebarMargin()));
     h_sizer_mixed_title->SetMinSize(-1, FromDIP(30));

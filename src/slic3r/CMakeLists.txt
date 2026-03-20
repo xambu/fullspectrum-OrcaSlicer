@@ -260,6 +260,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/IMToolbar.hpp
     GUI/InstanceCheck.cpp
     GUI/InstanceCheck.hpp
+    GUI/KSColorSolverDialog.cpp
+    GUI/KSColorSolverDialog.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
     GUI/Jobs/BindJob.cpp
