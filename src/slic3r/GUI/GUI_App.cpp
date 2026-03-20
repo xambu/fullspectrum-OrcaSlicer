@@ -89,6 +89,7 @@
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "Preferences.hpp"
+#include "HueForgeSync.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
 #include "UpdateDialogs.hpp"
@@ -974,7 +975,18 @@ void GUI_App::post_init()
         show_network_plugin_download_dialog(false);
     }
 
-    // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash 
+    // HueForge auto-sync on startup (user opt-in, non-blocking).
+    if (app_config->get("hueforge_auto_sync_on_startup") == "true") {
+        hueforge_sync_async(/*force=*/false, [](HueForgeSyncResult result) {
+            if (result.success)
+                BOOST_LOG_TRIVIAL(info) << "HueForge auto-sync: updated " << result.matched
+                                        << " filaments from " << (result.from_cache ? "cache" : "network");
+            else
+                BOOST_LOG_TRIVIAL(warning) << "HueForge auto-sync failed: " << result.error_msg;
+        });
+    }
+
+    // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash
     if (app_config->get("sync_user_preset") == "true") {
         // BBS loading user preset
         // Always async, not such startup step

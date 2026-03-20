@@ -18,6 +18,7 @@
 #include "slic3r/Utils/bambu_networking.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "DownloadProgressDialog.hpp"
+#include "HueForgeSync.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -1559,6 +1560,37 @@ void PreferencesDialog::create_items()
         "sync_ams_filament_mode",
         {_L("Filament & Color"), _L("Color only")});
     g_sizer->Add(item_filament_sync_mode);
+
+    //// ONLINE > HueForge TD sync
+    g_sizer->Add(create_item_title(_L("HueForge Filament TD Sync")), 1, wxEXPAND);
+
+    auto item_hueforge_sync_btn = create_item_button(
+        _L("HueForge filament database"),
+        _L("Sync"),
+        "",
+        _L("Fetch the HueForge community filament database and update TD (Transmission Distance) "
+           "values for matching filament presets. Results are cached for 7 days."),
+        [this]() {
+            hueforge_sync_async(/*force=*/true, [this](HueForgeSyncResult result) {
+                if (result.success) {
+                    const wxString msg = wxString::Format(
+                        _L("HueForge sync complete.\nUpdated TD for %d filaments (%d unmatched)."),
+                        result.matched, result.unmatched);
+                    wxMessageBox(msg, _L("HueForge Sync"), wxOK | wxICON_INFORMATION, this);
+                } else {
+                    wxMessageBox(wxString::Format(_L("HueForge sync failed: %s"), result.error_msg),
+                                 _L("HueForge Sync"), wxOK | wxICON_WARNING, this);
+                }
+            });
+        });
+    g_sizer->Add(item_hueforge_sync_btn);
+
+    auto item_hueforge_auto_sync = create_item_checkbox(
+        _L("Auto-sync HueForge filament database on startup"),
+        _L("Automatically fetch and apply filament TD values from the HueForge database each time "
+           "OrcaSlicer starts. A fresh copy is fetched at most once every 7 days."),
+        "hueforge_auto_sync_on_startup");
+    g_sizer->Add(item_hueforge_auto_sync);
 
     //// ONLINE > Network plugin
     g_sizer->Add(create_item_title(_L("Network plug-in")), 1, wxEXPAND);

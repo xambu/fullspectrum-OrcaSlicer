@@ -303,6 +303,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LibVGCode/LibVGCodeWrapper.cpp
     GUI/MainFrame.cpp
     GUI/MainFrame.hpp
+    GUI/HueForgeSync.cpp
+    GUI/HueForgeSync.hpp
     GUI/MarkdownTip.cpp
     GUI/MarkdownTip.hpp
     GUI/MediaFilePanel.cpp

@@ -2,9 +2,11 @@
 
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/HueForgeImporter.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <fstream>
 #include <sstream>
 #include <vector>
 
@@ -557,4 +559,216 @@ TEST_CASE("ExtrusionPath copies preserve inset index", "[MixedFilament]")
     assigned.inset_idx = 0;
     assigned = src;
     CHECK(assigned.inset_idx == 3);
+}
+
+// ---------------------------------------------------------------------------
+// predict_mixed_color — Kubelka-Munk K/S blending API
+// ---------------------------------------------------------------------------
+
+// Parse "#RRGGBB" into {r,g,b} in [0,255].
+static std::array<int, 3> parse_hex(const std::string &hex)
+{
+    int r = 0, g = 0, b = 0;
+    if (hex.size() >= 7 && hex[0] == '#') {
+        r = std::stoi(hex.substr(1, 2), nullptr, 16);
+        g = std::stoi(hex.substr(3, 2), nullptr, 16);
+        b = std::stoi(hex.substr(5, 2), nullptr, 16);
+    }
+    return {r, g, b};
+}
+
+TEST_CASE("predict_mixed_color returns valid #RRGGBB string", "[MixedFilament][KS]")
+{
+    const std::string result = predict_mixed_color({{"#FF0000", 1}, {"#0000FF", 1}});
+    REQUIRE(result.size() == 7);
+    REQUIRE(result[0] == '#');
+    // Verify all characters are valid hex digits
+    for (size_t i = 1; i < 7; ++i) {
+        const char c = result[i];
+        REQUIRE(((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')));
+    }
+}
+
+TEST_CASE("predict_mixed_color single component returns that color", "[MixedFilament][KS]")
+{
+    const std::string result = predict_mixed_color({{"#FF0000", 100}});
+    REQUIRE(result == "#FF0000");
+}
+
+TEST_CASE("predict_mixed_color 100 pct A returns A color", "[MixedFilament][KS]")
+{
+    const std::string result = predict_mixed_color({{"#FF0000", 100}, {"#0000FF", 0}});
+    REQUIRE(result == "#FF0000");
+}
+
+TEST_CASE("predict_mixed_color 100 pct B returns B color", "[MixedFilament][KS]")
+{
+    const std::string result = predict_mixed_color({{"#FF0000", 0}, {"#0000FF", 100}});
+    REQUIRE(result == "#0000FF");
+}
+
+TEST_CASE("predict_mixed_color is symmetric for equal weights", "[MixedFilament][KS]")
+{
+    const std::string ab = predict_mixed_color({{"#FF8000", 1}, {"#0080FF", 1}});
+    const std::string ba = predict_mixed_color({{"#0080FF", 1}, {"#FF8000", 1}});
+    REQUIRE(ab == ba);
+}
+
+TEST_CASE("predict_mixed_color same color blends to itself", "[MixedFilament][KS]")
+{
+    // Mixing a color with itself at any ratio must yield the same color.
+    const std::string result = predict_mixed_color({{"#4488CC", 3}, {"#4488CC", 1}});
+    REQUIRE(result == "#4488CC");
+}
+
+TEST_CASE("predict_mixed_color K/S is subtractive: red-dominant mix is redder than balanced", "[MixedFilament][KS]")
+{
+    // Use real-world-ish filament colors (not pure primaries) so K/S K ratios
+    // stay finite and the subtractive effect shows clearly.
+    // Red-ish: #E53935  Blue-ish: #1565C0
+    const std::string balanced = predict_mixed_color({{"#E53935", 50}, {"#1565C0", 50}});
+    const std::string red_dom  = predict_mixed_color({{"#E53935", 75}, {"#1565C0", 25}});
+
+    const auto c_balanced = parse_hex(balanced);
+    const auto c_red_dom  = parse_hex(red_dom);
+
+    // Red-dominant blend must have higher R channel than balanced blend.
+    CHECK(c_red_dom[0] >= c_balanced[0]);
+    // Blue channel must be lower in the red-dominant blend.
+    CHECK(c_red_dom[2] <= c_balanced[2]);
+}
+
+TEST_CASE("predict_mixed_color multi-component 3-way blend returns valid color", "[MixedFilament][KS]")
+{
+    // Three-component gradient blend.
+    const std::string result = predict_mixed_color({
+        {"#FF0000", 50},
+        {"#00FF00", 25},
+        {"#0000FF", 25}
+    });
+    REQUIRE(result.size() == 7);
+    REQUIRE(result[0] == '#');
+}
+
+TEST_CASE("predict_mixed_color weights need not sum to 100", "[MixedFilament][KS]")
+{
+    // 1:1 ratio via weight values other than 50/50
+    const std::string r1 = predict_mixed_color({{"#AABBCC", 1},  {"#334455", 1}});
+    const std::string r2 = predict_mixed_color({{"#AABBCC", 50}, {"#334455", 50}});
+    REQUIRE(r1 == r2);
+}
+
+// ---------------------------------------------------------------------------
+// TD-weighted K/S (Option A: filament_td1s)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("predict_mixed_color TD-weighted path differs from RGB-only path", "[MixedFilament][KS][TD]")
+{
+    // Red td1s=2.0 + Blue td1s=2.0 at 50/50.
+    // opacity = 1 - exp(-2.0) ≈ 0.865 — scales down K/S contributions.
+    // The result should differ from the RGB-only path.
+    const std::string td_result = predict_mixed_color({
+        {"#FF0000", 50, 2.0f},
+        {"#0000FF", 50, 2.0f}
+    });
+    const std::string rgb_result = predict_mixed_color({
+        {"#FF0000", 50, 0.0f},
+        {"#0000FF", 50, 0.0f}
+    });
+    // Both must be valid hex colors.
+    REQUIRE(td_result.size() == 7);
+    REQUIRE(td_result[0] == '#');
+    REQUIRE(rgb_result.size() == 7);
+    REQUIRE(rgb_result[0] == '#');
+    // TD path uses scaled K/S; results should differ from unscaled K/S.
+    CHECK(td_result != rgb_result);
+}
+
+TEST_CASE("predict_mixed_color falls back to RGB-only when one component lacks TD", "[MixedFilament][KS][TD]")
+{
+    // One td1s=0, one td1s=2 — must use RGB-only path (same as both td1s=0).
+    const std::string mixed_td = predict_mixed_color({
+        {"#E53935", 50, 2.0f},
+        {"#1565C0", 50, 0.0f}  // no TD for this one
+    });
+    const std::string rgb_only = predict_mixed_color({
+        {"#E53935", 50, 0.0f},
+        {"#1565C0", 50, 0.0f}
+    });
+    REQUIRE(mixed_td == rgb_only);
+}
+
+// ---------------------------------------------------------------------------
+// HueForge JSON parser (Option B)
+// ---------------------------------------------------------------------------
+
+// Write a minimal HueForge JSON fixture to a temp file and parse it.
+static std::string write_hueforge_fixture()
+{
+    const std::string path = std::string(TEST_DATA_DIR) + "/hueforge_fixture.json";
+    std::ofstream ofs(path);
+    ofs << R"([
+  {"brand": "Bambu Lab",  "name": "PLA Basic - Red",    "material": "PLA", "color": "#F01515", "td": 1.5},
+  {"brand": "PolyMaker", "name": "PolyTerra Teal",      "material": "PLA", "color": "#009688", "td": 2.1},
+  {"brand": "Overture",  "name": "PETG Transparent",    "material": "PETG","color": "#CCE5FF", "td": 0.3}
+])";
+    return path;
+}
+
+TEST_CASE("hueforge_parse_json extracts 3 entries from fixture", "[HueForge][KS]")
+{
+    const std::string path = write_hueforge_fixture();
+    const auto entries = hueforge_parse_json(path);
+    REQUIRE(entries.size() == 3);
+
+    SECTION("First entry: Bambu Lab PLA Basic Red") {
+        REQUIRE(entries[0].brand    == "Bambu Lab");
+        REQUIRE(entries[0].name     == "PLA Basic - Red");
+        REQUIRE(entries[0].material == "PLA");
+        REQUIRE(entries[0].hex_color == "#F01515");
+        REQUIRE_THAT(entries[0].td, Catch::Matchers::WithinAbs(1.5, 1e-4));
+    }
+    SECTION("Second entry: PolyMaker PolyTerra Teal") {
+        REQUIRE(entries[1].brand    == "PolyMaker");
+        REQUIRE_THAT(entries[1].td, Catch::Matchers::WithinAbs(2.1, 1e-4));
+    }
+    SECTION("Third entry: Overture PETG Transparent") {
+        REQUIRE(entries[2].material == "PETG");
+        REQUIRE_THAT(entries[2].td, Catch::Matchers::WithinAbs(0.3, 1e-4));
+    }
+}
+
+TEST_CASE("hueforge_parse_json returns empty on missing file", "[HueForge][KS]")
+{
+    const auto entries = hueforge_parse_json("/nonexistent/path/that/does/not/exist.json");
+    REQUIRE(entries.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Fuzzy matching
+// ---------------------------------------------------------------------------
+
+TEST_CASE("hueforge_fuzzy_match handles case and special chars", "[HueForge][KS]")
+{
+    using namespace Slic3r;
+    SECTION("Exact match after normalize") {
+        const std::string a = hueforge_normalize("Bambu PLA Basic - Red");
+        const std::string b = hueforge_normalize("bambu pla basic red");
+        CHECK(hueforge_fuzzy_match(a, b));
+    }
+    SECTION("Preset name contains entry key") {
+        // Orca preset: "Bambu PLA Basic @BBL A1M" — the entry key is a substring.
+        const std::string preset_norm = hueforge_normalize("Bambu PLA Basic Red @BBL A1M");
+        const std::string entry_norm  = hueforge_normalize("bambu pla basic red");
+        CHECK(hueforge_fuzzy_match(preset_norm, entry_norm));
+    }
+    SECTION("No match for completely different strings") {
+        const std::string a = hueforge_normalize("Bambu PLA Basic Red");
+        const std::string b = hueforge_normalize("Overture PETG Transparent");
+        CHECK_FALSE(hueforge_fuzzy_match(a, b));
+    }
+    SECTION("Empty strings do not match") {
+        CHECK_FALSE(hueforge_fuzzy_match("", "bambuplabasicred"));
+        CHECK_FALSE(hueforge_fuzzy_match("bambuplabasicred", ""));
+    }
 }
