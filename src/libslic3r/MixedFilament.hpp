@@ -145,7 +145,13 @@ public:
     // filament colours.  Generates all C(N,2) pairwise combinations.
     // Previous ratio/enabled state is preserved when a combination still
     // exists.
-    void auto_generate(const std::vector<std::string> &filament_colours);
+    // filament_td1s: per-filament Transmission Distance in mm (HueForge).
+    //   Empty or 0 entries fall back to RGB-only K/S blending.
+    // layer_height:  actual print layer height in mm; affects Beer-Lambert
+    //   opacity when TD data is present.
+    void auto_generate(const std::vector<std::string> &filament_colours,
+                       const std::vector<float>       &filament_td1s = {},
+                       float                           layer_height  = 1.f);
 
     // Remove a physical filament (1-based ID) from the mixed list.
     // Any mixed filament that contains the removed component is deleted.
@@ -153,7 +159,12 @@ public:
     void remove_physical_filament(unsigned int deleted_filament_id);
 
     // Add a custom mixed filament.
-    void add_custom_filament(unsigned int component_a, unsigned int component_b, int mix_b_percent, const std::vector<std::string> &filament_colours);
+    void add_custom_filament(unsigned int                   component_a,
+                             unsigned int                   component_b,
+                             int                            mix_b_percent,
+                             const std::vector<std::string> &filament_colours,
+                             const std::vector<float>       &filament_td1s = {},
+                             float                           layer_height  = 1.f);
 
     // Remove all custom rows, keep auto-generated ones.
     void clear_custom_entries();
@@ -168,7 +179,10 @@ public:
     // Persist mixed rows, including auto/deleted state, into the compact
     // project-settings string.
     std::string serialize_custom_entries();
-    void load_custom_entries(const std::string &serialized, const std::vector<std::string> &filament_colours);
+    void load_custom_entries(const std::string              &serialized,
+                             const std::vector<std::string> &filament_colours,
+                             const std::vector<float>       &filament_td1s = {},
+                             float                           layer_height  = 1.f);
 
     // Normalize a manual mixed-pattern string into compact token form.
     // Accepts separators and A/B aliases. Returns empty string if invalid.
@@ -242,7 +256,9 @@ private:
         return static_cast<size_t>(filament_id - num_physical - 1);
     }
 
-    void refresh_display_colors(const std::vector<std::string> &filament_colours);
+    void refresh_display_colors(const std::vector<std::string> &filament_colours,
+                                const std::vector<float>       &filament_td1s = {},
+                                float                           layer_height  = 1.f);
     uint64_t allocate_stable_id();
     uint64_t normalize_stable_id(uint64_t stable_id);
 

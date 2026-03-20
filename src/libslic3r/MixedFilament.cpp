@@ -870,7 +870,9 @@ uint64_t MixedFilamentManager::normalize_stable_id(uint64_t stable_id)
     return stable_id;
 }
 
-void MixedFilamentManager::auto_generate(const std::vector<std::string> &filament_colours)
+void MixedFilamentManager::auto_generate(const std::vector<std::string> &filament_colours,
+                                         const std::vector<float>       &filament_td1s,
+                                         float                           layer_height)
 {
     // Keep a copy of the old list so we can preserve user-modified ratios and
     // enabled flags and custom rows.
@@ -928,7 +930,7 @@ void MixedFilamentManager::auto_generate(const std::vector<std::string> &filamen
     for (MixedFilament &mf : custom_rows)
         m_mixed.push_back(std::move(mf));
 
-    refresh_display_colors(filament_colours);
+    refresh_display_colors(filament_colours, filament_td1s, layer_height);
 }
 
 void MixedFilamentManager::remove_physical_filament(unsigned int deleted_filament_id)
@@ -952,10 +954,12 @@ void MixedFilamentManager::remove_physical_filament(unsigned int deleted_filamen
     m_mixed = std::move(filtered);
 }
 
-void MixedFilamentManager::add_custom_filament(unsigned int component_a,
-                                               unsigned int component_b,
-                                               int          mix_b_percent,
-                                               const std::vector<std::string> &filament_colours)
+void MixedFilamentManager::add_custom_filament(unsigned int                   component_a,
+                                               unsigned int                   component_b,
+                                               int                            mix_b_percent,
+                                               const std::vector<std::string> &filament_colours,
+                                               const std::vector<float>       &filament_td1s,
+                                               float                           layer_height)
 {
     const size_t n = filament_colours.size();
     if (n < 2)
@@ -984,7 +988,7 @@ void MixedFilamentManager::add_custom_filament(unsigned int component_a,
     mf.custom = true;
     mf.origin_auto = false;
     m_mixed.push_back(std::move(mf));
-    refresh_display_colors(filament_colours);
+    refresh_display_colors(filament_colours, filament_td1s, layer_height);
 }
 
 void MixedFilamentManager::clear_custom_entries()
@@ -1076,7 +1080,10 @@ std::string MixedFilamentManager::serialize_custom_entries()
     return ss.str();
 }
 
-void MixedFilamentManager::load_custom_entries(const std::string &serialized, const std::vector<std::string> &filament_colours)
+void MixedFilamentManager::load_custom_entries(const std::string              &serialized,
+                                               const std::vector<std::string> &filament_colours,
+                                               const std::vector<float>       &filament_td1s,
+                                               float                           layer_height)
 {
     const size_t n = filament_colours.size();
     if (serialized.empty() || n < 2) {
@@ -1244,7 +1251,7 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
     }
 
     m_mixed = std::move(rebuilt);
-    refresh_display_colors(filament_colours);
+    refresh_display_colors(filament_colours, filament_td1s, layer_height);
     BOOST_LOG_TRIVIAL(info) << "MixedFilamentManager::load_custom_entries"
                             << ", physical_count=" << n
                             << ", parsed_rows=" << parsed_rows
@@ -1493,8 +1500,12 @@ std::string MixedFilamentManager::blend_color(const std::string &color_a,
     return rgb_to_hex({int(out_r), int(out_g), int(out_b)});
 }
 
-void MixedFilamentManager::refresh_display_colors(const std::vector<std::string> &filament_colours)
+void MixedFilamentManager::refresh_display_colors(const std::vector<std::string> &filament_colours,
+                                                  const std::vector<float>       &filament_td1s,
+                                                  float                           layer_height)
 {
+    const float lh = (layer_height > 1e-6f) ? layer_height : 1.f;
+
     for (MixedFilament &mf : m_mixed) {
         const std::vector<unsigned int> gradient_ids = decode_gradient_component_ids(mf.gradient_component_ids, filament_colours.size());
         if (mf.distribution_mode != int(MixedFilament::Simple) && gradient_ids.size() >= 3) {
@@ -1514,15 +1525,27 @@ void MixedFilamentManager::refresh_display_colors(const std::vector<std::string>
                 if (it != gradient_ids.end())
                     ++counts[size_t(it - gradient_ids.begin())];
             }
-            std::vector<std::pair<std::string, int>> color_percents;
-            color_percents.reserve(gradient_ids.size());
+            // Build FilamentColorDef list with TD values when available.
+            std::vector<FilamentColorDef> defs;
+            defs.reserve(gradient_ids.size());
+            bool all_have_td = true;
             for (size_t i = 0; i < gradient_ids.size(); ++i) {
                 const int wi = std::max(0, counts[i]);
                 if (wi == 0)
                     continue;
-                color_percents.emplace_back(filament_colours[gradient_ids[i] - 1], wi);
+                const unsigned int gid = gradient_ids[i];
+                const float td = (gid >= 1 && gid <= filament_td1s.size()) ? filament_td1s[gid - 1] : 0.f;
+                if (td <= 0.f) all_have_td = false;
+                defs.push_back({filament_colours[gid - 1], wi, td});
             }
-            mf.display_color = blend_color_ks_impl(color_percents);
+            if (all_have_td && !defs.empty()) {
+                mf.display_color = predict_mixed_color(defs, lh);
+            } else {
+                std::vector<std::pair<std::string, int>> color_percents;
+                for (const auto &d : defs)
+                    color_percents.emplace_back(d.hex_color, d.weight);
+                mf.display_color = blend_color_ks_impl(color_percents);
+            }
             continue;
         }
         if (mf.component_a == 0 || mf.component_b == 0 ||
@@ -1532,10 +1555,21 @@ void MixedFilamentManager::refresh_display_colors(const std::vector<std::string>
         }
         const int ratio_a = std::max(0, 100 - clamp_int(mf.mix_b_percent, 0, 100));
         const int ratio_b = clamp_int(mf.mix_b_percent, 0, 100);
-        mf.display_color = blend_color_ks_2(
-            filament_colours[mf.component_a - 1],
-            filament_colours[mf.component_b - 1],
-            ratio_a, ratio_b);
+
+        // Use Beer-Lambert TD-weighted K/S when both components have TD data.
+        const float td_a = (mf.component_a <= filament_td1s.size()) ? filament_td1s[mf.component_a - 1] : 0.f;
+        const float td_b = (mf.component_b <= filament_td1s.size()) ? filament_td1s[mf.component_b - 1] : 0.f;
+        if (td_a > 0.f && td_b > 0.f) {
+            mf.display_color = predict_mixed_color({
+                {filament_colours[mf.component_a - 1], ratio_a, td_a},
+                {filament_colours[mf.component_b - 1], ratio_b, td_b}
+            }, lh);
+        } else {
+            mf.display_color = blend_color_ks_2(
+                filament_colours[mf.component_a - 1],
+                filament_colours[mf.component_b - 1],
+                ratio_a, ratio_b);
+        }
     }
 }
 

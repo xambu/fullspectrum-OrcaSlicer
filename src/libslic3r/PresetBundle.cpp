@@ -4379,7 +4379,23 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             };
 
             color_opt->values.resize(num_filaments, "#26A69A");
-            this->mixed_filaments.auto_generate(color_opt->values);
+
+            // Collect per-filament TD (Transmission Distance) values from presets.
+            std::vector<float> td1s_vals;
+            td1s_vals.reserve(filament_presets.size());
+            for (const std::string &fp_name : filament_presets) {
+                const Preset *fp = this->filaments.find_preset(fp_name);
+                float td = 0.f;
+                if (fp) {
+                    const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
+                    if (td_opt && !td_opt->values.empty())
+                        td = float(td_opt->values[0]);
+                }
+                td1s_vals.push_back(td);
+            }
+            const float lh = float(this->prints.get_edited_preset().config.opt_float("layer_height"));
+
+            this->mixed_filaments.auto_generate(color_opt->values, td1s_vals, lh);
 
             int   gradient_mode     = get_mixed_mode(false) ? 1 : 0;
             float lower_bound       = get_mixed_float("mixed_filament_height_lower_bound", 0.04f);
@@ -4390,7 +4406,7 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             upper_bound   = std::max(lower_bound, upper_bound);
 
             this->mixed_filaments.clear_custom_entries();
-            this->mixed_filaments.load_custom_entries(get_mixed_string("mixed_filament_definitions"), color_opt->values);
+            this->mixed_filaments.load_custom_entries(get_mixed_string("mixed_filament_definitions"), color_opt->values, td1s_vals, lh);
             this->mixed_filaments.apply_gradient_settings(gradient_mode, lower_bound, upper_bound, advanced_dithering);
 
             const std::string serialized = this->mixed_filaments.serialize_custom_entries();

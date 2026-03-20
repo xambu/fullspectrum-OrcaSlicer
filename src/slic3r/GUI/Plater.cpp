@@ -5375,11 +5375,29 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     bool  advanced_dithering = get_mixed_bool("mixed_filament_advanced_dithering", false);
     const std::string mixed_definitions = get_mixed_string("mixed_filament_definitions");
 
+    // Collect per-filament TD values from the current filament presets.
+    std::vector<float> td1s_vals;
+    {
+        const auto &fp_names = preset_bundle->filament_presets;
+        td1s_vals.reserve(fp_names.size());
+        for (const std::string &fp_name : fp_names) {
+            const Preset *fp = preset_bundle->filaments.find_preset(fp_name);
+            float td = 0.f;
+            if (fp) {
+                const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
+                if (td_opt && !td_opt->values.empty())
+                    td = float(td_opt->values[0]);
+            }
+            td1s_vals.push_back(td);
+        }
+    }
+    const float lh = float(preset_bundle->prints.get_edited_preset().config.opt_float("layer_height"));
+
     auto &mixed_mgr = preset_bundle->mixed_filaments;
     if (sync_manager) {
-        mixed_mgr.auto_generate(physical_colors);
+        mixed_mgr.auto_generate(physical_colors, td1s_vals, lh);
         mixed_mgr.clear_custom_entries();
-        mixed_mgr.load_custom_entries(mixed_definitions, physical_colors);
+        mixed_mgr.load_custom_entries(mixed_definitions, physical_colors, td1s_vals, lh);
         mixed_mgr.apply_gradient_settings(gradient_mode, lower_bound, upper_bound, advanced_dithering);
     }
 
