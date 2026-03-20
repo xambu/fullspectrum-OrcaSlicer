@@ -112,6 +112,29 @@ float RetinaHelper::get_scale_factor() { return float(m_window->GetContentScaleF
 #undef Convex
 #endif
 
+// Returns filament IDs ordered for UI display (physical first, then mixed/virtual),
+// sanitized so every ID is valid and unique.
+static std::vector<unsigned int> get_ui_ordered_filament_ids(Plater *plater, size_t total_filaments)
+{
+    std::vector<unsigned int> ordered_ids;
+    if (plater != nullptr)
+        ordered_ids = plater->sidebar().get_ui_ordered_filament_ids();
+
+    std::vector<unsigned int> sanitized_ids;
+    sanitized_ids.reserve(total_filaments);
+    std::vector<bool> used(total_filaments + 1, false);
+    for (const unsigned int filament_id : ordered_ids) {
+        if (filament_id == 0 || filament_id > total_filaments || used[filament_id])
+            continue;
+        used[filament_id] = true;
+        sanitized_ids.emplace_back(filament_id);
+    }
+    for (unsigned int filament_id = 1; filament_id <= total_filaments; ++filament_id) {
+        if (!used[filament_id])
+            sanitized_ids.emplace_back(filament_id);
+    }
+    return sanitized_ids;
+}
 
 std::string& get_object_limited_text() {
     static std::string object_limited_text = _u8L("An object is placed in the left/right nozzle-only area or exceeds the printable height of the left nozzle.\n"
@@ -3426,8 +3449,16 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
                 if (keyCode < '7')  keyCode += 10;
                 m_timer_set_color.Stop();
             }
-            if (m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation)
-                obj_list->set_extruder_for_selected_items(keyCode - '0');
+            if (m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation) {
+                const int display_filament_id = keyCode - '0';
+                const size_t total_filaments = wxGetApp().plater()->get_extruder_colors_from_plater_config().size();
+                const std::vector<unsigned int> ordered_filament_ids =
+                    get_ui_ordered_filament_ids(wxGetApp().plater(), total_filaments);
+                if (display_filament_id >= 1 && size_t(display_filament_id) <= ordered_filament_ids.size())
+                    obj_list->set_extruder_for_selected_items(int(ordered_filament_ids[size_t(display_filament_id - 1)]));
+                else
+                    obj_list->set_extruder_for_selected_items(display_filament_id);
+            }
             break;
         }
 
@@ -3968,8 +3999,11 @@ void GLCanvas3D::on_render_timer(wxTimerEvent& evt)
 void GLCanvas3D::on_set_color_timer(wxTimerEvent& evt)
 {
     auto obj_list = wxGetApp().obj_list();
-    if (m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation)
-        obj_list->set_extruder_for_selected_items(1);
+    if (m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation) {
+        const std::vector<unsigned int> ordered_filament_ids =
+            get_ui_ordered_filament_ids(wxGetApp().plater(), wxGetApp().plater()->get_extruder_colors_from_plater_config().size());
+        obj_list->set_extruder_for_selected_items(ordered_filament_ids.empty() ? 1 : int(ordered_filament_ids.front()));
+    }
     m_timer_set_color.Stop();
 }
 

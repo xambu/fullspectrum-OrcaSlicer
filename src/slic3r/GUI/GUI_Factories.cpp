@@ -36,9 +36,47 @@ static PrinterTechnology printer_technology()
     return wxGetApp().preset_bundle->printers.get_selected_preset().printer_technology();
 }
 
+static int physical_filaments_count()
+{
+    if (wxGetApp().preset_bundle == nullptr)
+        return 0;
+    return static_cast<int>(wxGetApp().preset_bundle->filament_presets.size());
+}
+
 static int filaments_count()
 {
-    return wxGetApp().filaments_cnt();
+    if (wxGetApp().preset_bundle == nullptr)
+        return 0;
+    const int physical = physical_filaments_count();
+    const auto &mixed_mgr = wxGetApp().preset_bundle->mixed_filaments;
+    return static_cast<int>(mixed_mgr.total_filaments(size_t(physical)));
+}
+
+static std::vector<unsigned int> ui_ordered_filament_ids()
+{
+    if (wxGetApp().plater() == nullptr)
+        return {};
+    return wxGetApp().plater()->sidebar().get_ui_ordered_filament_ids();
+}
+
+static wxString filament_menu_item_name(const int filament_id_1based, const int display_filament_id_1based)
+{
+    if (filament_id_1based <= 0)
+        return _L("Default");
+    if (wxGetApp().preset_bundle == nullptr)
+        return wxString::Format(_L("Filament %d"), filament_id_1based);
+    const int physical = physical_filaments_count();
+    if (filament_id_1based <= physical) {
+        const size_t preset_idx = size_t(filament_id_1based - 1);
+        const auto &filament_presets = wxGetApp().preset_bundle->filament_presets;
+        if (preset_idx < filament_presets.size()) {
+            auto preset = wxGetApp().preset_bundle->filaments.find_preset(filament_presets[preset_idx]);
+            if (preset != nullptr)
+                return from_u8(preset->label(false));
+        }
+        return wxString::Format(_L("Filament %d"), filament_id_1based);
+    }
+    return wxString::Format(_L("Mixed Filament %d"), display_filament_id_1based);
 }
 
 static bool is_improper_category(const std::string& category, const int filaments_cnt, const bool is_object_settings = true)
@@ -936,33 +974,26 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
         initial_extruder = config.has("extruder") ? config.extruder() : 1;
     }
 
-    for (int i = 0; i <= filaments_cnt; i++)
+    const auto ordered_filament_ids = ui_ordered_filament_ids();
+    for (size_t display_idx = 0; display_idx <= ordered_filament_ids.size(); ++display_idx)
     {
-        bool is_active_extruder = i == initial_extruder;
-        int icon_idx = i == 0 ? 0 : i - 1;
+        const int actual_id = display_idx == 0 ? 0 : int(ordered_filament_ids[display_idx - 1]) + 1;
+        bool is_active_extruder = actual_id == initial_extruder;
+        int icon_idx = display_idx == 0 ? 0 : int(ordered_filament_ids[display_idx - 1]);
 
-        wxString item_name = _L("Default");
-
-        if (i > 0) {
-            auto preset = wxGetApp().preset_bundle->filaments.find_preset(wxGetApp().preset_bundle->filament_presets[i - 1]);
-            if (preset == nullptr) {
-                item_name = wxString::Format(_L("Filament %d"), i);
-            } else {
-                item_name = from_u8(preset->label(false));
-            }
-        }
+        wxString item_name = filament_menu_item_name(actual_id, int(display_idx));
 
         if (is_active_extruder) {
             item_name << " (" + _L("current") + ")";
         }
 
-        if (icon_idx >= 0 && icon_idx < icons.size()) {
+        if (icon_idx >= 0 && icon_idx < (int)icons.size()) {
             append_menu_item(
-                extruder_selection_menu, wxID_ANY, item_name, "", [i](wxCommandEvent &) { obj_list()->set_extruder_for_selected_items(i); }, *icons[icon_idx], menu,
+                extruder_selection_menu, wxID_ANY, item_name, "", [actual_id](wxCommandEvent &) { obj_list()->set_extruder_for_selected_items(actual_id); }, *icons[icon_idx], menu,
                 [is_active_extruder]() { return !is_active_extruder; }, m_parent);
         } else {
             append_menu_item(
-                extruder_selection_menu, wxID_ANY, item_name, "", [i](wxCommandEvent &) { obj_list()->set_extruder_for_selected_items(i); }, "", menu,
+                extruder_selection_menu, wxID_ANY, item_name, "", [actual_id](wxCommandEvent &) { obj_list()->set_extruder_for_selected_items(actual_id); }, "", menu,
                 [is_active_extruder]() { return !is_active_extruder; }, m_parent);
         }
     }
@@ -2120,29 +2151,23 @@ void MenuFactory::append_menu_item_change_filament(wxMenu* menu)
         }
     }
 
-    for (int i = has_modifier ? 0 : 1; i <= filaments_cnt; i++)
+    const auto ordered_filament_ids2 = ui_ordered_filament_ids();
+    const size_t start_display_idx = has_modifier ? 0 : 1;
+    for (size_t display_idx = start_display_idx; display_idx <= ordered_filament_ids2.size(); ++display_idx)
     {
-        // BBS
-        //bool is_active_extruder = i == initial_extruder;
+        const int actual_id = display_idx == 0 ? 0 : int(ordered_filament_ids2[display_idx - 1]) + 1;
         bool is_active_extruder = false;
+        int icon_idx = display_idx == 0 ? -1 : int(ordered_filament_ids2[display_idx - 1]);
 
-        wxString item_name = _L("Default");
-
-        if (i > 0) {
-            auto preset = wxGetApp().preset_bundle->filaments.find_preset(wxGetApp().preset_bundle->filament_presets[i - 1]);
-            if (preset == nullptr) {
-                item_name = wxString::Format(_L("Filament %d"), i);
-            } else {
-                item_name = from_u8(preset->label(false));
-            }
-        }
+        wxString item_name = filament_menu_item_name(actual_id, int(display_idx));
 
         if (is_active_extruder) {
             item_name << " (" + _L("current") + ")";
         }
 
         append_menu_item(extruder_selection_menu, wxID_ANY, item_name, "",
-            [i](wxCommandEvent&) { obj_list()->set_extruder_for_selected_items(i); }, i == 0 ? wxNullBitmap : *icons[i - 1], menu,
+            [actual_id](wxCommandEvent&) { obj_list()->set_extruder_for_selected_items(actual_id); },
+            (icon_idx >= 0 && icon_idx < (int)icons.size()) ? *icons[icon_idx] : wxNullBitmap, menu,
             [is_active_extruder]() { return !is_active_extruder; }, m_parent);
     }
     menu->Append(wxID_ANY, name, extruder_selection_menu, _L("Change Filament"));

@@ -1266,6 +1266,21 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         }
     }
 
+    // Rebuild the mixed-filament manager whenever filament settings changed.
+    // This is inexpensive and keeps m_mixed_filament_mgr in sync with the
+    // current physical filament list and user-defined custom blends.
+    {
+        const size_t num_physical = m_config.filament_diameter.size();
+        std::vector<std::string> physical_colors = m_config.filament_colour.values;
+        physical_colors.resize(num_physical, "#FFFFFF");
+        std::string mixed_defs;
+        if (const auto *opt = m_full_print_config.option<ConfigOptionString>("mixed_filament_definitions"); opt != nullptr)
+            mixed_defs = opt->value;
+        m_mixed_filament_mgr.clear_custom_entries();
+        m_mixed_filament_mgr.auto_generate(physical_colors);
+        m_mixed_filament_mgr.load_custom_entries(mixed_defs, physical_colors);
+    }
+
     ModelObjectStatusDB model_object_status_db;
 
     // 1) Synchronize model objects.

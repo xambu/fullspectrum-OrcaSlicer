@@ -1928,6 +1928,28 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
     }
 
+    // Keep Mixed Filaments global settings in sync with project_config. In
+    // full_fff_config(), project_config is applied last and would otherwise
+    // override the edited print preset value from the Others panel.
+    if (m_type == Preset::TYPE_PRINT &&
+        (opt_key == "mixed_filament_gradient_mode" ||
+         opt_key == "mixed_filament_height_lower_bound" ||
+         opt_key == "mixed_filament_height_upper_bound" ||
+         opt_key == "mixed_color_layer_height_a" ||
+         opt_key == "mixed_color_layer_height_b" ||
+         opt_key == "mixed_filament_advanced_dithering" ||
+         opt_key == "mixed_filament_pointillism_pixel_size" ||
+         opt_key == "mixed_filament_pointillism_line_gap" ||
+         opt_key == "mixed_filament_surface_indentation" ||
+         opt_key == "dithering_z_step_size" ||
+         opt_key == "dithering_local_z_mode" ||
+         opt_key == "dithering_step_painted_zones_only" ||
+         opt_key == "mixed_filament_definitions")) {
+        DynamicPrintConfig &project_cfg = wxGetApp().preset_bundle->project_config;
+        if (const ConfigOption *opt = m_config->option(opt_key))
+            project_cfg.set_key_value(opt_key, opt->clone());
+    }
+
     if (m_postpone_update_ui) {
         // It means that not all values are rolled to the system/last saved values jet.
         // And call of the update() can causes a redundant check of the config values,
@@ -2673,6 +2695,18 @@ void TabPrint::build()
 
         optgroup->append_single_option_line("timelapse_type", "others_settings_special_mode#timelapse");
         optgroup->append_single_option_line("enable_wrapping_detection");
+
+        optgroup = page->new_optgroup(L("Mixed Filaments"));
+        optgroup->append_single_option_line("mixed_filament_gradient_mode");
+        optgroup->append_single_option_line("mixed_filament_height_lower_bound");
+        optgroup->append_single_option_line("mixed_filament_height_upper_bound");
+        optgroup->append_single_option_line("mixed_filament_advanced_dithering");
+        optgroup->append_single_option_line("mixed_filament_pointillism_pixel_size");
+        optgroup->append_single_option_line("mixed_filament_pointillism_line_gap");
+        optgroup->append_single_option_line("mixed_filament_surface_indentation");
+        optgroup->append_single_option_line("dithering_z_step_size");
+        optgroup->append_single_option_line("dithering_local_z_mode");
+        optgroup->append_single_option_line("dithering_step_painted_zones_only");
 
         optgroup = page->new_optgroup(L("Fuzzy Skin"), L"fuzzy_skin");
         optgroup->append_single_option_line("fuzzy_skin", "others_settings_fuzzy_skin");

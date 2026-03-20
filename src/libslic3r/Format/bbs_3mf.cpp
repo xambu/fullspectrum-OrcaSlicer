@@ -1,6 +1,7 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
 #include "../Model.hpp"
+#include "../MixedFilament.hpp"
 #include "../Preset.hpp"
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
@@ -2107,7 +2108,30 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
 
         const ConfigOptionStrings* filament_ids_opt = config.option<ConfigOptionStrings>("filament_settings_id");
-        int max_filament_id = filament_ids_opt ? filament_ids_opt->size() : std::numeric_limits<int>::max();
+        int max_filament_id = filament_ids_opt ? (int)filament_ids_opt->size() : std::numeric_limits<int>::max();
+        // Extend max_filament_id to include virtual mixed filaments when present.
+        if (filament_ids_opt && !filament_ids_opt->values.empty()) {
+            const size_t physical_count = filament_ids_opt->values.size();
+            if (physical_count >= 2) {
+                const auto *mixed_defs_opt = config.option<ConfigOptionString>("mixed_filament_definitions");
+                if (mixed_defs_opt != nullptr && !mixed_defs_opt->value.empty()) {
+                    std::vector<std::string> physical_colors;
+                    if (const auto *col_opt = config.option<ConfigOptionStrings>("filament_colour"); col_opt != nullptr)
+                        physical_colors = col_opt->values;
+                    else if (const auto *col_opt = config.option<ConfigOptionStrings>("default_filament_colour"); col_opt != nullptr)
+                        physical_colors = col_opt->values;
+                    physical_colors.resize(physical_count, "#FFFFFF");
+                    MixedFilamentManager mixed_mgr;
+                    mixed_mgr.auto_generate(physical_colors);
+                    mixed_mgr.load_custom_entries(mixed_defs_opt->value, physical_colors);
+                    const size_t total = mixed_mgr.total_filaments(physical_count);
+                    if (total > size_t(max_filament_id))
+                        max_filament_id = (total >= size_t(std::numeric_limits<int>::max()))
+                                          ? std::numeric_limits<int>::max()
+                                          : int(total);
+                }
+            }
+        }
         for (ModelObject* mo : m_model->objects) {
             const ConfigOptionInt* extruder_opt = dynamic_cast<const ConfigOptionInt*>(mo->config.option("extruder"));
             int extruder_id = 0;

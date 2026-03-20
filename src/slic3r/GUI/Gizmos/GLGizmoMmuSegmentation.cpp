@@ -19,6 +19,30 @@
 
 namespace Slic3r::GUI {
 
+// Returns filament IDs ordered for UI display (physical first, then mixed/virtual),
+// sanitized so every ID is valid and unique.
+static std::vector<unsigned int> get_display_filament_ids(size_t total_filaments)
+{
+    std::vector<unsigned int> ordered_filament_ids;
+    if (wxGetApp().plater() != nullptr)
+        ordered_filament_ids = wxGetApp().plater()->sidebar().get_ui_ordered_filament_ids();
+
+    std::vector<unsigned int> sanitized_filament_ids;
+    sanitized_filament_ids.reserve(total_filaments);
+    std::vector<bool> used_filament_ids(total_filaments + 1, false);
+    for (const unsigned int filament_id : ordered_filament_ids) {
+        if (filament_id == 0 || filament_id > total_filaments || used_filament_ids[filament_id])
+            continue;
+        used_filament_ids[filament_id] = true;
+        sanitized_filament_ids.emplace_back(filament_id);
+    }
+    for (unsigned int filament_id = 1; filament_id <= total_filaments; ++filament_id) {
+        if (!used_filament_ids[filament_id])
+            sanitized_filament_ids.emplace_back(filament_id);
+    }
+    return sanitized_filament_ids;
+}
+
 static inline void show_notification_extruders_limit_exceeded()
 {
     wxGetApp()
@@ -795,6 +819,29 @@ void GLGizmoMmuSegmentation::update_model_object()
     }
 
     if (updated) {
+        const size_t num_physical = static_cast<size_t>(std::max(wxGetApp().filaments_cnt(), 0));
+        size_t       num_total    = num_physical;
+        if (wxGetApp().preset_bundle != nullptr)
+            num_total = wxGetApp().preset_bundle->mixed_filaments.total_filaments(num_physical);
+
+        size_t max_used_state = 0;
+        for (const ModelVolume *mv : mo->volumes) {
+            if (!mv->is_model_part())
+                continue;
+            const auto &used_states = mv->mmu_segmentation_facets.get_data().used_states;
+            for (size_t state_idx = static_cast<size_t>(EnforcerBlockerType::Extruder1); state_idx < used_states.size(); ++state_idx) {
+                if (used_states[state_idx])
+                    max_used_state = std::max(max_used_state, state_idx);
+            }
+        }
+
+        if (max_used_state > num_physical) {
+            BOOST_LOG_TRIVIAL(warning) << "GLGizmoMmuSegmentation::update_model_object painted virtual extruder state detected"
+                                       << " max_used_state=" << max_used_state
+                                       << " physical_filaments=" << num_physical
+                                       << " total_filaments=" << num_total;
+        }
+
         const ModelObjectPtrs &mos = wxGetApp().model().objects;
         size_t obj_idx = std::find(mos.begin(), mos.end(), mo) - mos.begin();
         wxGetApp().obj_list()->update_info_items(obj_idx);

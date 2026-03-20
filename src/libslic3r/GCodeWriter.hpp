@@ -32,6 +32,9 @@ public:
     const Extruder* filament(size_t extruder_id) const { assert(extruder_id < m_curr_filament_extruder.size()); return m_curr_filament_extruder[extruder_id]; }
     Extruder* filament() { if (m_curr_extruder_id == -1) return nullptr; return m_curr_filament_extruder[m_curr_extruder_id]; }
     const Extruder* filament() const { if(m_curr_extruder_id==-1) return nullptr; return m_curr_filament_extruder[m_curr_extruder_id]; }
+    // Alias used by orca-fs ported code.
+    Extruder* extruder() { return filament(); }
+    const Extruder* extruder() const { return filament(); }
 
     void                 apply_print_config(const PrintConfig &print_config);
     // Extruders are expected to be sorted in an increasing order.

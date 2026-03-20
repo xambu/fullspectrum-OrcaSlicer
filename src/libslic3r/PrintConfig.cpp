@@ -4629,6 +4629,121 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionStrings());
     
+    def = this->add("mixed_color_layer_height_a", coFloat);
+    def->label = L("Dithering cadence height A");
+    def->category = L("Others");
+    def->tooltip = L("Layer height contribution of component A for dithering virtual filaments. "
+                     "Set to 0 to use normal 1-layer A / 1-layer B alternation.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_color_layer_height_b", coFloat);
+    def->label = L("Dithering cadence height B");
+    def->category = L("Others");
+    def->tooltip = L("Layer height contribution of component B for dithering virtual filaments. "
+                     "Set to 0 to use normal 1-layer A / 1-layer B alternation.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_gradient_mode", coBool);
+    def->label = L("Height-weighted cadence");
+    def->category = L("Others");
+    def->tooltip = L("Enable height-weighted cadence for mixed filaments. "
+                     "When disabled, layer-cycle cadence is used.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_height_lower_bound", coFloat);
+    def->label = L("Mixed filament lower height bound");
+    def->category = L("Others");
+    def->tooltip = L("Lower bound used by the height-weighted mixed filament gradient mode.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.04));
+
+    def = this->add("mixed_filament_height_upper_bound", coFloat);
+    def->label = L("Mixed filament upper height bound");
+    def->category = L("Others");
+    def->tooltip = L("Upper bound used by the height-weighted mixed filament gradient mode.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.16));
+
+    def = this->add("mixed_filament_advanced_dithering", coBool);
+    def->label = L("Advanced dithering");
+    def->category = L("Others");
+    def->tooltip = L("Distribute mixed filament layer-cycle cadence using an advanced ordered dithering "
+                     "pattern instead of a simple contiguous A-then-B run.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_pointillism_pixel_size", coFloat);
+    def->label = L("Pointillisme pixel size");
+    def->category = L("Others");
+    def->tooltip = L("Length of one pointillisme segment along an extrusion path for same-layer pointillisme mode. "
+                     "Set to 0 to use automatic nozzle-based sizing.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_pointillism_line_gap", coFloat);
+    def->label = L("Pointillisme line gap");
+    def->category = L("Others");
+    def->tooltip = L("Optional non-extruded spacing between adjacent pointillisme segments.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_surface_indentation", coFloat);
+    def->label = L("Selective Expansion contraction");
+    def->category = L("Others");
+    def->tooltip = L("XY offset applied to mixed-filament painted regions before region assignment. "
+                     "Positive values contract the mixed zone inward. Negative values expand it outward.");
+    def->sidetext = "mm";
+    def->min = -2.0;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_definitions", coString);
+    def->label = L("Mixed filament custom definitions");
+    def->tooltip = L("Serialized custom mixed filament rows.");
+    def->gui_flags = "serialized";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("dithering_z_step_size", coFloat);
+    def->label = L("Dithering Z step size");
+    def->category = L("Others");
+    def->tooltip = L("Layer height used in Z zones painted with dithering (mixed virtual filaments). "
+                     "Set to 0 to keep normal layer height in those zones.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("dithering_local_z_mode", coBool);
+    def->label = L("Local Z dithering mode");
+    def->category = L("Others");
+    def->tooltip = L("Blend colors by varying layer heights instead of using a fixed ratio of equal-height layers.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("dithering_step_painted_zones_only", coBool);
+    def->label = L("Use step size in painted zones only");
+    def->category = L("Others");
+    def->tooltip = L("When enabled, the dithering Z step size only applies to regions painted with mixed virtual filaments.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("printer_model", coString);
     def->label = L("Printer type");
     def->tooltip = L("Type of the printer.");
@@ -4818,6 +4933,11 @@ void PrintConfigDef::init_fff_params()
     def->mode       = comAdvanced;
     def->min        = 0;
     def->set_default_value(new ConfigOptionFloats{0.});
+
+    def = this->add("z_hop_when_prime", coBools);
+    def->label = L("Z hop when moving to tower");
+    def->mode  = comAdvanced;
+    def->set_default_value(new ConfigOptionBools{true});
 
     def = this->add("z_hop_types", coEnums);
     def->label = L("Z-hop type");

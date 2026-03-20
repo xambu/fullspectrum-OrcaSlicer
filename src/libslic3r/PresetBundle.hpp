@@ -1,6 +1,7 @@
 #ifndef slic3r_PresetBundle_hpp_
 #define slic3r_PresetBundle_hpp_
 
+#include "MixedFilament.hpp"
 #include "Preset.hpp"
 #include "AppConfig.hpp"
 #include "enum_bitmask.hpp"
@@ -213,6 +214,9 @@ public:
     std::map<int, DynamicPrintConfig> filament_ams_list;
     std::vector<std::vector<std::string>> ams_multi_color_filment;
 
+    // Mixed (virtual) filaments for layer-based colour mixing.
+    MixedFilamentManager        mixed_filaments;
+
     std::vector<std::map<int, int>> extruder_ams_counts;
 
     // Calibrate
@@ -311,7 +315,22 @@ public:
 
     // Read out the number of extruders from an active printer preset,
     // update size and content of filament_presets.
-    void                        update_multi_material_filament_presets(size_t to_delete_filament_id = size_t(-1));
+    void                        update_multi_material_filament_presets(size_t to_delete_filament_id = size_t(-1),
+                                                                       size_t old_num_filaments = size_t(-1));
+    // Rebuild old->new virtual filament mapping after mixed-row enable/delete
+    // changes when the physical filament count itself did not change.
+    void                        update_mixed_filament_id_remap(const std::vector<MixedFilament> &old_mixed,
+                                                               size_t old_num_filaments,
+                                                               size_t new_num_filaments);
+    // Mapping generated during the latest filament count change.
+    // Index is old 1-based filament ID, value is new 1-based filament ID (0 = removed).
+    const std::vector<unsigned int>& last_filament_id_remap() const { return m_last_filament_id_remap; }
+    std::vector<unsigned int> consume_last_filament_id_remap()
+    {
+        std::vector<unsigned int> out = std::move(m_last_filament_id_remap);
+        m_last_filament_id_remap.clear();
+        return out;
+    }
 
     void                        on_extruders_count_changed(int extruder_count);
 
@@ -383,10 +402,17 @@ private:
     DynamicPrintConfig          full_fff_config(bool apply_extruder, std::optional<std::vector<int>> filament_maps=std::nullopt) const;
     DynamicPrintConfig          full_sla_config() const;
 
+    void                        build_filament_id_remap(const std::vector<MixedFilament> &old_mixed,
+                                                        size_t old_num_filaments,
+                                                        size_t new_num_filaments,
+                                                        bool deleting_filament,
+                                                        unsigned int deleted_1based);
+
     // Orca: used for validation only
     bool validation_mode = false;
-    std::string vendor_to_validate = ""; 
+    std::string vendor_to_validate = "";
     int m_errors = 0;
+    std::vector<unsigned int> m_last_filament_id_remap;
 
 };
 

@@ -298,6 +298,11 @@ set(lisbslic3r_sources
     miniz_extension.hpp
     ModelArrange.cpp
     ModelArrange.hpp
+    filament_mixer.cpp
+    filament_mixer.h
+    filament_mixer_model.h
+    MixedFilament.cpp
+    MixedFilament.hpp
     Model.cpp
     Model.hpp
     MTUtils.hpp
