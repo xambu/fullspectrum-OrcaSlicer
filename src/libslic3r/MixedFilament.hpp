@@ -22,6 +22,33 @@ struct FilamentColorDef
                             // 0 = not set → fall back to RGB-only K/S.
 };
 
+// ---------------------------------------------------------------------------
+// K/S Ratio Solver
+// ---------------------------------------------------------------------------
+
+// Result returned by solve_mix_ratio_result().
+struct MixRatioResult
+{
+    int         mix_b_percent   = 50;  // Optimal blend: percent of component B [0..100]
+    std::string predicted_color;       // "#RRGGBB" at the solved ratio
+    float       delta_e_approx  = 0.f; // Perceptual error vs. target [0..100], lower=better
+};
+
+// Find the mix_b_percent [0..100] that minimises the perceptual distance
+// between predict_mixed_color(A, B, ratio) and target_hex.
+// Uses golden-section search (unimodal assumption over the K/S blend manifold).
+// layer_height: print layer height in mm (used for Beer-Lambert TD path).
+int solve_mix_ratio(const std::string      &target_hex,
+                    const FilamentColorDef &component_a,
+                    const FilamentColorDef &component_b,
+                    float                   layer_height = 1.f);
+
+// Same as above but returns the predicted color and approximate ΔE alongside.
+MixRatioResult solve_mix_ratio_result(const std::string      &target_hex,
+                                      const FilamentColorDef &component_a,
+                                      const FilamentColorDef &component_b,
+                                      float                   layer_height = 1.f);
+
 // Predict the display color of a physical-pigment blend using the
 // Kubelka-Munk K/S model.  Works for 2 or more components.
 //

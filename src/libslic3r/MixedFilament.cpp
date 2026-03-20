@@ -1666,4 +1666,93 @@ std::string predict_mixed_color(const std::vector<FilamentColorDef> &components,
     return blend_color_ks_impl(color_percents);
 }
 
+// ---------------------------------------------------------------------------
+// K/S Ratio Solver
+// ---------------------------------------------------------------------------
+
+// Perceptual (CIE-approximate) squared distance between two #RRGGBB strings.
+// Uses gamma-corrected linear-light weighting: R*0.299, G*0.587, B*0.114.
+static float color_distance_sq(const std::string &a, const std::string &b)
+{
+    const RGB ca = parse_hex_color(a);
+    const RGB cb = parse_hex_color(b);
+    const float dr = float(ca.r - cb.r);
+    const float dg = float(ca.g - cb.g);
+    const float db = float(ca.b - cb.b);
+    return 0.299f * dr * dr + 0.587f * dg * dg + 0.114f * db * db;
+}
+
+// Evaluate predicted color for a 2-component blend at mix_b_percent in [0,100].
+static std::string predict_at_percent(const FilamentColorDef &a,
+                                      const FilamentColorDef &b,
+                                      int   mix_b_percent,
+                                      float layer_height)
+{
+    const int wa = 100 - mix_b_percent;
+    const int wb = mix_b_percent;
+    return predict_mixed_color(
+        {{a.hex_color, wa, a.td1s}, {b.hex_color, wb, b.td1s}},
+        layer_height);
+}
+
+int solve_mix_ratio(const std::string     &target_hex,
+                    const FilamentColorDef &component_a,
+                    const FilamentColorDef &component_b,
+                    float                   layer_height)
+{
+    // Golden-section search on mix_b_percent in [0, 100].
+    // The perceptual distance function is unimodal (roughly convex) along
+    // the K/S blend manifold, so golden-section finds the global minimum.
+    const float phi = (std::sqrt(5.f) - 1.f) / 2.f; // ≈ 0.618
+
+    float lo = 0.f, hi = 100.f;
+    float x1 = hi - phi * (hi - lo);
+    float x2 = lo + phi * (hi - lo);
+
+    auto dist = [&](float pct) -> float {
+        const int p = std::clamp(int(std::round(pct)), 0, 100);
+        return color_distance_sq(target_hex,
+                                 predict_at_percent(component_a, component_b, p, layer_height));
+    };
+
+    float f1 = dist(x1);
+    float f2 = dist(x2);
+
+    for (int iter = 0; iter < 60; ++iter) {
+        if (hi - lo < 0.5f)
+            break;
+        if (f1 < f2) {
+            hi = x2;
+            x2 = x1; f2 = f1;
+            x1 = hi - phi * (hi - lo);
+            f1 = dist(x1);
+        } else {
+            lo = x1;
+            x1 = x2; f1 = f2;
+            x2 = lo + phi * (hi - lo);
+            f2 = dist(x2);
+        }
+    }
+
+    return std::clamp(int(std::round((lo + hi) / 2.f)), 0, 100);
+}
+
+MixRatioResult solve_mix_ratio_result(const std::string      &target_hex,
+                                      const FilamentColorDef &component_a,
+                                      const FilamentColorDef &component_b,
+                                      float                   layer_height)
+{
+    MixRatioResult res;
+    res.mix_b_percent   = solve_mix_ratio(target_hex, component_a, component_b, layer_height);
+    res.predicted_color = predict_at_percent(component_a, component_b,
+                                             res.mix_b_percent, layer_height);
+    const RGB pt = parse_hex_color(target_hex);
+    const RGB pp = parse_hex_color(res.predicted_color);
+    const float dr = float(pt.r - pp.r) / 255.f;
+    const float dg = float(pt.g - pp.g) / 255.f;
+    const float db = float(pt.b - pp.b) / 255.f;
+    res.delta_e_approx  = std::sqrt(0.299f * dr * dr + 0.587f * dg * dg + 0.114f * db * db) * 100.f;
+    return res;
+}
+
 } // namespace Slic3r

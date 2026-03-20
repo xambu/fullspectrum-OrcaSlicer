@@ -811,3 +811,159 @@ TEST_CASE("hueforge_fuzzy_match handles case and special chars", "[HueForge][KS]
         CHECK_FALSE(hueforge_fuzzy_match("bambuplabasicred", ""));
     }
 }
+
+// ---------------------------------------------------------------------------
+// K/S Ratio Solver
+// ---------------------------------------------------------------------------
+
+TEST_CASE("solve_mix_ratio: target = pure A yields 0% B", "[MixedFilament][KS][Solver]")
+{
+    // Asking for component A's own color should give mix_b_percent ≈ 0.
+    const FilamentColorDef a{"#CC3300", 1};
+    const FilamentColorDef b{"#003366", 1};
+    const int result = solve_mix_ratio(a.hex_color, a, b);
+    CHECK(result <= 5);
+}
+
+TEST_CASE("solve_mix_ratio: target = pure B yields 100% B", "[MixedFilament][KS][Solver]")
+{
+    const FilamentColorDef a{"#CC3300", 1};
+    const FilamentColorDef b{"#003366", 1};
+    const int result = solve_mix_ratio(b.hex_color, a, b);
+    CHECK(result >= 95);
+}
+
+TEST_CASE("solve_mix_ratio: target = 50/50 blend recovers near 50%", "[MixedFilament][KS][Solver]")
+{
+    // Blend A and B at exactly 50/50, then ask the solver to recover that ratio.
+    const FilamentColorDef a{"#AAAAAA", 1};
+    const FilamentColorDef b{"#555555", 1};
+    const std::string blend_50 = predict_mixed_color({{"#AAAAAA", 50}, {"#555555", 50}});
+    const int result = solve_mix_ratio(blend_50, a, b);
+    // Allow ±10% tolerance (K/S round-trips through 8-bit quantization).
+    CHECK(result >= 40);
+    CHECK(result <= 60);
+}
+
+TEST_CASE("solve_mix_ratio_result: result struct is consistent", "[MixedFilament][KS][Solver]")
+{
+    const FilamentColorDef a{"#E53935", 1};
+    const FilamentColorDef b{"#1565C0", 1};
+    const MixRatioResult res = solve_mix_ratio_result("#8B2090", a, b);
+
+    // predicted_color must be a valid hex string.
+    REQUIRE(res.predicted_color.size() == 7);
+    REQUIRE(res.predicted_color[0] == '#');
+
+    // mix_b_percent must be in range.
+    CHECK(res.mix_b_percent >= 0);
+    CHECK(res.mix_b_percent <= 100);
+
+    // delta_e_approx must be non-negative.
+    CHECK(res.delta_e_approx >= 0.f);
+
+    // The predicted_color at the returned ratio must equal predict_mixed_color directly.
+    const std::string direct = predict_mixed_color({
+        {"#E53935", 100 - res.mix_b_percent},
+        {"#1565C0", res.mix_b_percent}
+    });
+    CHECK(res.predicted_color == direct);
+}
+
+// ---------------------------------------------------------------------------
+// Coaxial filament (TD/translucency) scenario
+//
+// This models the 3D-printable coaxial filament use case:
+//   - An opaque inner core (e.g. vivid red, td1s ≈ 0 = fully opaque)
+//   - A translucent outer shell (e.g. clear/white, high td1s = 3 mm)
+// The apparent color of the finished filament depends on the shell thickness,
+// which maps directly to layer_height in Beer–Lambert:
+//   opacity = 1 - exp(-layer_height / td1s)
+//
+// At thin shell (0.1 mm) → mostly transparent → inner color dominates.
+// At thick shell (2.0 mm) → more opaque → shell color dominates.
+// The ratio solver finds what ratio of inner:outer gives a target appearance.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Coaxial filament: thin shell — inner (opaque) color dominates", "[MixedFilament][KS][Coaxial]")
+{
+    // Inner: vivid red, fully opaque (td1s = 0 → RGB-only K/S path).
+    // Outer: near-white translucent (td1s = 3.0 mm).
+    // At 0.1 mm shell the outer is nearly invisible.
+    const FilamentColorDef inner{"#CC2200", 1, 0.f};   // opaque red
+    const FilamentColorDef outer{"#EEEEEE", 1, 3.0f};  // translucent white
+
+    // Since inner has td1s=0 the RGB-only K/S path is used.
+    // A 90% inner / 10% outer blend should look close to the inner color.
+    const std::string result = predict_mixed_color(
+        {{"#CC2200", 90, 0.f}, {"#EEEEEE", 10, 0.f}});
+
+    const auto rgb = parse_hex(result);
+    // Red channel must dominate (>= 150).
+    CHECK(rgb[0] >= 150);
+    // Blue channel must stay low (<= 80).
+    CHECK(rgb[2] <= 80);
+}
+
+TEST_CASE("Coaxial filament: TD solver finds ratio for target hue", "[MixedFilament][KS][Coaxial]")
+{
+    // Both components have TD data so Beer–Lambert path is active.
+    // Inner: opaque red-orange, td1s = 0.4 mm (moderately opaque).
+    // Outer: translucent sky-blue, td1s = 2.5 mm.
+    const FilamentColorDef inner{"#D84315", 1, 0.4f};
+    const FilamentColorDef outer{"#4FC3F7", 1, 2.5f};
+
+    // Target: something between orange and blue — a muted salmon/mauve.
+    const std::string target = "#9C7070";
+    const float layer_height = 0.2f;  // typical FDM layer
+
+    const MixRatioResult res = solve_mix_ratio_result(target, inner, outer, layer_height);
+
+    // Solver must return a valid percentage.
+    CHECK(res.mix_b_percent >= 0);
+    CHECK(res.mix_b_percent <= 100);
+
+    // Predicted color must be a valid hex.
+    REQUIRE(res.predicted_color.size() == 7);
+    REQUIRE(res.predicted_color[0] == '#');
+
+    // Perceptual error should be below 30 (on a 0-100 scale) —
+    // the K/S gamut may not perfectly reproduce all target hues,
+    // but the solver should find the closest achievable point.
+    CHECK(res.delta_e_approx < 30.f);
+
+    // As outer (blue) proportion increases the red channel should decrease.
+    const std::string less_outer = predict_mixed_color(
+        {{inner.hex_color, 80, inner.td1s}, {outer.hex_color, 20, outer.td1s}}, layer_height);
+    const std::string more_outer = predict_mixed_color(
+        {{inner.hex_color, 20, inner.td1s}, {outer.hex_color, 80, outer.td1s}}, layer_height);
+
+    const auto rgb_less = parse_hex(less_outer);
+    const auto rgb_more = parse_hex(more_outer);
+    // More outer (blue) → lower red, higher blue.
+    CHECK(rgb_less[0] >= rgb_more[0]);
+    CHECK(rgb_less[2] <= rgb_more[2]);
+}
+
+TEST_CASE("Coaxial filament: layer height affects predicted color", "[MixedFilament][KS][Coaxial]")
+{
+    // Both have TD data — Beer–Lambert is active.
+    // A thicker outer shell layer means more opacity → outer color dominates more.
+    const FilamentColorDef inner{"#BF360C", 50, 0.5f};  // dark orange-red
+    const FilamentColorDef outer{"#E3F2FD", 50, 2.0f};  // very light blue (translucent)
+
+    const std::string thin  = predict_mixed_color(
+        {{inner.hex_color, 50, inner.td1s}, {outer.hex_color, 50, outer.td1s}},
+        /*layer_height=*/0.1f);
+    const std::string thick = predict_mixed_color(
+        {{inner.hex_color, 50, inner.td1s}, {outer.hex_color, 50, outer.td1s}},
+        /*layer_height=*/1.0f);
+
+    // Colors must differ between thin and thick shells.
+    CHECK(thin != thick);
+
+    // Thick shell → more outer (light blue) opacity → higher blue channel.
+    const auto rgb_thin  = parse_hex(thin);
+    const auto rgb_thick = parse_hex(thick);
+    CHECK(rgb_thick[2] >= rgb_thin[2]);
+}
