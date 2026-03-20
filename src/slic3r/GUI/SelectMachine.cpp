@@ -1010,6 +1010,20 @@ bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_,bool use_ams)
     const auto& project_config = wxGetApp().preset_bundle->project_config;
     size_t nozzle_nums = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 
+    // FullSpectrum: if the slicer preset has more nozzles than the target printer
+    // (e.g. printing a dual-extruder mixed-filament job to a single-nozzle X1C),
+    // treat all filaments as belonging to the single nozzle so they map to the AMS
+    // rather than falling back to "external spool" for the "missing" nozzle.
+    if (obj_ && obj_->GetExtderSystem()) {
+        size_t target_nozzle_count = static_cast<size_t>(obj_->GetExtderSystem()->GetTotalExtderCount());
+        if (target_nozzle_count > 0 && target_nozzle_count < nozzle_nums) {
+            BOOST_LOG_TRIVIAL(info) << "do_ams_mapping: slicer preset has " << nozzle_nums
+                                    << " nozzles but target printer has " << target_nozzle_count
+                                    << " — collapsing to single-nozzle AMS mapping";
+            nozzle_nums = target_nozzle_count;
+        }
+    }
+
     if (m_print_type == FROM_NORMAL) {
         m_filaments_map = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_real_filament_maps(project_config);
     }
@@ -3848,6 +3862,20 @@ void SelectMachineDialog::reset_and_sync_ams_list()
 
     const auto& full_config = wxGetApp().preset_bundle->full_config();
     size_t nozzle_nums = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+
+    // FullSpectrum: collapse to single-nozzle layout if the target printer has
+    // fewer physical extruders than the slicer preset (e.g. X1C with a dual-
+    // extruder mixed-filament preset).  This prevents filaments from being
+    // placed in a left-panel that has no corresponding AMS on the target printer.
+    {
+        DeviceManager *dev_for_layout = Slic3r::GUI::wxGetApp().getDeviceManager();
+        MachineObject *obj_for_layout = dev_for_layout ? dev_for_layout->get_selected_machine() : nullptr;
+        if (obj_for_layout && obj_for_layout->GetExtderSystem()) {
+            size_t target_extder = static_cast<size_t>(obj_for_layout->GetExtderSystem()->GetTotalExtderCount());
+            if (target_extder > 0 && target_extder < nozzle_nums)
+                nozzle_nums = target_extder;
+        }
+    }
 
     bool use_double_extruder = nozzle_nums > 1 ? true : false;
     if (use_double_extruder)

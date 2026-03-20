@@ -1474,6 +1474,17 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         auto emit_local_z_unplanned_toolchange = [&]() -> std::string {
             if (extruder_id < 0 || !gcodegen.writer().need_toolchange(extruder_id))
                 return "";
+            // When "flush into print" is enabled, skip the dedicated wipe-tower reserve
+            // purge path.  The first extrusion of the upcoming Local-Z perimeter pass
+            // absorbs the transitional material, matching the behaviour of flush_into_objects
+            // for regular tool changes.  This is safe for mixed-filament Local-Z passes
+            // because both component colours are intentional; only a small prime is needed.
+            if (gcodegen.config().flush_into_infill || gcodegen.config().flush_into_objects) {
+                BOOST_LOG_TRIVIAL(debug) << "Local-Z unplanned toolchange: flush_into_print enabled"
+                                         << " — skipping reserve purge, extruder_id=" << extruder_id;
+                return gcodegen.set_extruder(unsigned(extruder_id),
+                                             gcodegen.writer().get_position().z() - gcodegen.config().z_offset.value);
+            }
             if (m_layer_idx < 0 || size_t(m_layer_idx) >= m_local_z_reserve_boxes.size() ||
                 size_t(m_layer_idx) >= m_local_z_reserve_slot_idx.size()) {
                 BOOST_LOG_TRIVIAL(debug) << "Local-Z unplanned toolchange using direct extruder switch"
