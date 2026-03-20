@@ -23,6 +23,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/HueForgeImporter.hpp"
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -2704,6 +2705,10 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(import_menu, wxID_ANY, _L("Import Configs") + dots /*+ "\t" + ctrl + "I"*/, _L("Load configs"),
             [this](wxCommandEvent&) { load_config_file(); }, "menu_import", nullptr,
             [this](){return true; }, this);
+        append_menu_item(import_menu, wxID_ANY, _L("Import HueForge Filament Database") + dots,
+            _L("Import filament TD values from a HueForge-compatible JSON database and match to existing filament presets"),
+            [this](wxCommandEvent&) { import_hueforge_database(); }, "menu_import", nullptr,
+            [this](){return true; }, this);
 
         append_submenu(fileMenu, import_menu, wxID_ANY, _L("Import"), "");
 
@@ -3629,6 +3634,44 @@ void MainFrame::export_config()
             show_error(this, ex.what());
         }
     }
+}
+
+void MainFrame::import_hueforge_database()
+{
+    wxFileDialog dlg(this,
+                     _L("Import HueForge Filament Database"),
+                     wxEmptyString, wxEmptyString,
+                     "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    const std::string path = dlg.GetPath().ToUTF8().data();
+
+    const auto entries = Slic3r::hueforge_parse_json(path);
+    if (entries.empty()) {
+        wxMessageBox(_L("No filament entries found in the selected file."),
+                     _L("HueForge Import"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    Slic3r::PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (!bundle) {
+        wxMessageBox(_L("Preset bundle is not available."),
+                     _L("HueForge Import"), wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    const auto result = Slic3r::hueforge_apply_to_presets(entries, *bundle);
+
+    const wxString msg = wxString::Format(
+        _L("Updated TD values for %d of %d filaments.\n%d entries had no matching preset."),
+        result.matched, result.total_entries, result.unmatched);
+    wxMessageBox(msg, _L("HueForge Import Complete"), wxOK | wxICON_INFORMATION, this);
+
+    // Mark filament tab dirty so the user can save updated presets.
+    if (auto *tab = wxGetApp().get_tab(Slic3r::Preset::TYPE_FILAMENT))
+        tab->update_dirty();
 }
 
 // Load a config file containing a Print, Filament & Printer preset.

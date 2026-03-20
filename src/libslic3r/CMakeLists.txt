@@ -303,6 +303,8 @@ set(lisbslic3r_sources
     filament_mixer_model.h
     MixedFilament.cpp
     MixedFilament.hpp
+    HueForgeImporter.cpp
+    HueForgeImporter.hpp
     Model.cpp
     Model.hpp
     MTUtils.hpp

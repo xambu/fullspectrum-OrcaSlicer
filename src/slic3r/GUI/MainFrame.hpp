@@ -309,6 +309,8 @@ public:
     void        load_config_file();
     // Open a config file. Return true if loaded.
     bool        load_config_file(const std::string &path);
+    // Import HueForge filament database and apply TD values to presets.
+    void        import_hueforge_database();
 
     //BBS: export current config bundle as BBL default reference
     //void        export_current_configbundle();
