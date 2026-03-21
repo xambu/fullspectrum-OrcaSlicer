@@ -32,11 +32,19 @@ struct MixRatioResult
     int         mix_b_percent   = 50;  // Optimal blend: percent of component B [0..100]
     std::string predicted_color;       // "#RRGGBB" at the solved ratio
     float       delta_e_approx  = 0.f; // Perceptual error vs. target [0..100], lower=better
+    // True when the optimum fell at the boundary (0% or 100%): the target
+    // colour is outside the achievable gamut of this A:B pair.
+    bool        at_gamut_boundary = false;
+    // True when both components have td1s=0 (fully opaque): K/S predictions
+    // will be dark/pessimistic; visual result in LayerCycle mode is better
+    // approximated by simple RGB blending, not K/S.
+    bool        opaque_pair = false;
 };
 
 // Find the mix_b_percent [0..100] that minimises the perceptual distance
 // between predict_mixed_color(A, B, ratio) and target_hex.
-// Uses golden-section search (unimodal assumption over the K/S blend manifold).
+// Scans all 101 integer steps — the K/S blend manifold is not guaranteed
+// unimodal, so golden-section search is unreliable for arbitrary pigments.
 // layer_height: print layer height in mm (used for Beer-Lambert TD path).
 int solve_mix_ratio(const std::string      &target_hex,
                     const FilamentColorDef &component_a,

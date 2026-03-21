@@ -94,6 +94,7 @@ private:
     wxPanel            *m_pred_result_swatch = nullptr;
     wxStaticText       *m_pred_ratio_label  = nullptr;
     wxStaticText       *m_pred_delta_label  = nullptr;
+    wxStaticText       *m_pred_warn_label   = nullptr;  // gamut / opacity warnings
     wxButton           *m_pred_apply_btn    = nullptr;
 
     int m_solved_ratio = 50;  // last solved mix_b_percent

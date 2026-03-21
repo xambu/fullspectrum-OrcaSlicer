@@ -204,6 +204,15 @@ wxPanel *KSColorSolverDialog::build_prediction_panel(wxWindow *parent)
     lh_row->Add(lh_spin, 0);
     vs->Add(lh_row, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
 
+    // K/S applicability note
+    auto *ks_note = new wxStaticText(panel, wxID_ANY,
+        _L("K/S model is most accurate for translucent filaments (TD1S > 0) or\n"
+           "same-layer stripe mixing (Pointillisme mode).\n"
+           "For opaque filaments in Layer-Cycle mode, K/S predicts very dark\n"
+           "blends — the actual printed colour will be lighter (simple RGB average)."));
+    ks_note->SetForegroundColour(wxColour(80, 80, 120));
+    vs->Add(ks_note, 0, wxBOTTOM, FromDIP(6));
+
     // Solve button
     auto *solve_btn = new wxButton(panel, wxID_ANY, _L("Find optimal mix ratio"));
     solve_btn->Bind(wxEVT_BUTTON, &KSColorSolverDialog::on_predict_solve, this);
@@ -227,7 +236,12 @@ wxPanel *KSColorSolverDialog::build_prediction_panel(wxWindow *parent)
                      0, wxALIGN_CENTER_VERTICAL);
     m_pred_delta_label = new wxStaticText(panel, wxID_ANY, _L("—"));
     result_grid->Add(m_pred_delta_label, 0, wxALIGN_CENTER_VERTICAL);
-    vs->Add(result_grid, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
+    vs->Add(result_grid, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+
+    // Warning label (hidden until solve produces a boundary/opaque result)
+    m_pred_warn_label = new wxStaticText(panel, wxID_ANY, wxEmptyString);
+    m_pred_warn_label->SetForegroundColour(wxColour(180, 60, 0));
+    vs->Add(m_pred_warn_label, 0, wxBOTTOM, FromDIP(8));
 
     // Apply button
     m_pred_apply_btn = new wxButton(panel, wxID_ANY, _L("Apply ratio to mix"));
@@ -536,7 +550,26 @@ void KSColorSolverDialog::on_predict_solve(wxCommandEvent &)
     m_pred_delta_label->SetLabel(
         wxString::Format("%.1f", res.delta_e_approx));
 
+    // Build warning text from the new diagnostic flags
+    wxString warn;
+    if (res.at_gamut_boundary) {
+        warn += _L("Target colour is outside the achievable blend gamut of this\n"
+                   "A:B pair — the nearest boundary (pure A or pure B) is shown.\n"
+                   "Try a different pair of filaments to reach this target.");
+    }
+    if (res.opaque_pair) {
+        if (!warn.empty()) warn += "\n\n";
+        warn += _L("Both filaments are opaque (TD1S = 0). K/S predicts very dark\n"
+                   "blends for complementary colours (e.g. red+blue → near-black).\n"
+                   "For Layer-Cycle mode the actual print will look much lighter\n"
+                   "— closer to a simple RGB average of the two colours.");
+    }
+    m_pred_warn_label->SetLabel(warn);
+    m_pred_warn_label->Show(!warn.empty());
+    m_pred_warn_label->Wrap(FromDIP(380));
+
     Layout();
+    Fit();
 }
 
 void KSColorSolverDialog::on_predict_apply(wxCommandEvent &)

@@ -1700,41 +1700,26 @@ int solve_mix_ratio(const std::string     &target_hex,
                     const FilamentColorDef &component_b,
                     float                   layer_height)
 {
-    // Golden-section search on mix_b_percent in [0, 100].
-    // The perceptual distance function is unimodal (roughly convex) along
-    // the K/S blend manifold, so golden-section finds the global minimum.
-    const float phi = (std::sqrt(5.f) - 1.f) / 2.f; // ≈ 0.618
-
-    float lo = 0.f, hi = 100.f;
-    float x1 = hi - phi * (hi - lo);
-    float x2 = lo + phi * (hi - lo);
-
-    auto dist = [&](float pct) -> float {
-        const int p = std::clamp(int(std::round(pct)), 0, 100);
-        return color_distance_sq(target_hex,
-                                 predict_at_percent(component_a, component_b, p, layer_height));
-    };
-
-    float f1 = dist(x1);
-    float f2 = dist(x2);
-
-    for (int iter = 0; iter < 60; ++iter) {
-        if (hi - lo < 0.5f)
-            break;
-        if (f1 < f2) {
-            hi = x2;
-            x2 = x1; f2 = f1;
-            x1 = hi - phi * (hi - lo);
-            f1 = dist(x1);
-        } else {
-            lo = x1;
-            x1 = x2; f1 = f2;
-            x2 = lo + phi * (hi - lo);
-            f2 = dist(x2);
+    // Full scan over the 101 integer steps [0..100].
+    //
+    // The K/S blend manifold is NOT guaranteed to be unimodal for arbitrary
+    // pigment pairs (e.g. opaque red+blue produces near-black in K/S, so the
+    // distance-to-target function can be monotone with its minimum at a
+    // boundary).  Golden-section search would converge to the wrong answer in
+    // that case.  101 predict_mixed_color() calls are cheap enough (~0.1 ms)
+    // that an exhaustive scan is both simpler and correct.
+    int   best_pct  = 0;
+    float best_dist = std::numeric_limits<float>::max();
+    for (int pct = 0; pct <= 100; ++pct) {
+        const float d = color_distance_sq(
+            target_hex,
+            predict_at_percent(component_a, component_b, pct, layer_height));
+        if (d < best_dist) {
+            best_dist = d;
+            best_pct  = pct;
         }
     }
-
-    return std::clamp(int(std::round((lo + hi) / 2.f)), 0, 100);
+    return best_pct;
 }
 
 MixRatioResult solve_mix_ratio_result(const std::string      &target_hex,
@@ -1746,12 +1731,25 @@ MixRatioResult solve_mix_ratio_result(const std::string      &target_hex,
     res.mix_b_percent   = solve_mix_ratio(target_hex, component_a, component_b, layer_height);
     res.predicted_color = predict_at_percent(component_a, component_b,
                                              res.mix_b_percent, layer_height);
+
     const RGB pt = parse_hex_color(target_hex);
     const RGB pp = parse_hex_color(res.predicted_color);
     const float dr = float(pt.r - pp.r) / 255.f;
     const float dg = float(pt.g - pp.g) / 255.f;
     const float db = float(pt.b - pp.b) / 255.f;
-    res.delta_e_approx  = std::sqrt(0.299f * dr * dr + 0.587f * dg * dg + 0.114f * db * db) * 100.f;
+    res.delta_e_approx = std::sqrt(0.299f * dr * dr + 0.587f * dg * dg + 0.114f * db * db) * 100.f;
+
+    // Flag whether the optimum is at a blend-gamut boundary (0% or 100%).
+    // This means the target colour cannot be achieved by any A:B mix — the
+    // closest achievable colour is one of the pure components.
+    res.at_gamut_boundary = (res.mix_b_percent == 0 || res.mix_b_percent == 100);
+
+    // Flag fully opaque pairs: when both td1s values are 0 the K/S model
+    // operates without Beer-Lambert and tends to predict very dark mixed
+    // colours.  For opaque filaments in LayerCycle (alternating layers) mode
+    // the perceived colour is better approximated by simple RGB blending.
+    res.opaque_pair = (component_a.td1s <= 0.f && component_b.td1s <= 0.f);
+
     return res;
 }
 
