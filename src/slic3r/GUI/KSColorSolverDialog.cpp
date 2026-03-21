@@ -177,20 +177,7 @@ wxPanel *KSColorSolverDialog::build_prediction_panel(wxWindow *parent)
     panel->SetBackgroundColour(*wxWHITE);
     auto *vs = new wxBoxSizer(wxVERTICAL);
 
-    // Target colour row
-    auto *target_row = new wxBoxSizer(wxHORIZONTAL);
-    target_row->Add(new wxStaticText(panel, wxID_ANY, _L("Target colour:")),
-                    0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-    m_target_picker = new wxColourPickerCtrl(panel, wxID_ANY, *wxRED);
-    m_pred_target_swatch = make_swatch(panel, *wxRED);
-    target_row->Add(m_target_picker, 0, wxRIGHT, FromDIP(4));
-    target_row->Add(m_pred_target_swatch, 0, wxALIGN_CENTER_VERTICAL);
-    vs->Add(target_row, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
-
-    m_target_picker->Bind(wxEVT_COLOURPICKER_CHANGED,
-        &KSColorSolverDialog::on_predict_target_changed, this);
-
-    // Layer height
+    // ---- Layer height (affects K/S Beer-Lambert path) ----------------------
     auto *lh_row = new wxBoxSizer(wxHORIZONTAL);
     lh_row->Add(new wxStaticText(panel, wxID_ANY, _L("Layer height (mm):")),
                 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
@@ -200,56 +187,264 @@ wxPanel *KSColorSolverDialog::build_prediction_panel(wxWindow *parent)
         wxSP_ARROW_KEYS, 0.05, 0.5, m_layer_height, 0.05);
     lh_spin->Bind(wxEVT_SPINCTRLDOUBLE, [this, lh_spin](wxSpinDoubleEvent &) {
         m_layer_height = float(lh_spin->GetValue());
+        rebuild_blend_strip();
     });
     lh_row->Add(lh_spin, 0);
     vs->Add(lh_row, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
 
-    // K/S applicability note
-    auto *ks_note = new wxStaticText(panel, wxID_ANY,
-        _L("K/S model is most accurate for translucent filaments (TD1S > 0) or\n"
-           "same-layer stripe mixing (Pointillisme mode).\n"
-           "For opaque filaments in Layer-Cycle mode, K/S predicts very dark\n"
-           "blends — the actual printed colour will be lighter (simple RGB average)."));
-    ks_note->SetForegroundColour(wxColour(80, 80, 120));
-    vs->Add(ks_note, 0, wxBOTTOM, FromDIP(6));
+    // ---- Blend arc ---------------------------------------------------------
+    // Shows every achievable colour for the selected A:B pair.
+    // Replaces the "pick a colour and hope" approach — the user sees exactly
+    // what this pair can produce before they pick a target.
+    vs->Add(new wxStaticText(panel, wxID_ANY,
+                _L("Achievable blend arc  (click any swatch to select that ratio):")),
+            0, wxBOTTOM, FromDIP(3));
 
-    // Solve button
-    auto *solve_btn = new wxButton(panel, wxID_ANY, _L("Find optimal mix ratio"));
-    solve_btn->Bind(wxEVT_BUTTON, &KSColorSolverDialog::on_predict_solve, this);
-    vs->Add(solve_btn, 0, wxBOTTOM, FromDIP(8));
+    m_blend_strip_panel = new wxPanel(panel, wxID_ANY);
+    m_blend_strip_panel->SetBackgroundColour(*wxWHITE);
+    auto *strip_sizer = new wxBoxSizer(wxHORIZONTAL);
 
-    // Results
-    auto *result_grid = new wxFlexGridSizer(3, 2, FromDIP(4), FromDIP(8));
-    result_grid->AddGrowableCol(1);
+    m_blend_swatches.resize(11, nullptr);
+    m_blend_colors.resize(11);
+    for (int i = 0; i <= 10; ++i) {
+        auto *col_vs = new wxBoxSizer(wxVERTICAL);
+        auto *sw = make_swatch(m_blend_strip_panel, *wxLIGHT_GREY, wxSize(36, 36));
+        m_blend_swatches[i] = sw;
 
-    result_grid->Add(new wxStaticText(panel, wxID_ANY, _L("Optimal ratio:")),
-                     0, wxALIGN_CENTER_VERTICAL);
-    m_pred_ratio_label = new wxStaticText(panel, wxID_ANY, _L("—"));
-    result_grid->Add(m_pred_ratio_label, 0, wxALIGN_CENTER_VERTICAL);
+        // Percentage label below swatch
+        auto *lbl = new wxStaticText(m_blend_strip_panel, wxID_ANY,
+                        wxString::Format("%d%%", i * 10),
+                        wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
+        lbl->SetMinSize(wxSize(FromDIP(36), -1));
 
-    result_grid->Add(new wxStaticText(panel, wxID_ANY, _L("Predicted colour:")),
-                     0, wxALIGN_CENTER_VERTICAL);
-    m_pred_result_swatch = make_swatch(panel, *wxBLACK);
-    result_grid->Add(m_pred_result_swatch, 0, wxALIGN_CENTER_VERTICAL);
+        col_vs->Add(sw, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+        col_vs->Add(lbl, 0, wxALIGN_CENTER_HORIZONTAL);
+        strip_sizer->Add(col_vs, 0, wxRIGHT, FromDIP(3));
 
-    result_grid->Add(new wxStaticText(panel, wxID_ANY, _L("ΔE approx:")),
-                     0, wxALIGN_CENTER_VERTICAL);
-    m_pred_delta_label = new wxStaticText(panel, wxID_ANY, _L("—"));
-    result_grid->Add(m_pred_delta_label, 0, wxALIGN_CENTER_VERTICAL);
-    vs->Add(result_grid, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+        int ratio_b = i * 10;
+        sw->Bind(wxEVT_LEFT_DOWN, [this, ratio_b](wxMouseEvent &) {
+            on_blend_swatch_clicked(ratio_b);
+        });
+        // Tooltip
+        sw->SetToolTip(wxString::Format("A:%d%%  B:%d%%", 100 - ratio_b, ratio_b));
+    }
+    m_blend_strip_panel->SetSizer(strip_sizer);
+    vs->Add(m_blend_strip_panel, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
 
-    // Warning label (hidden until solve produces a boundary/opaque result)
+    // Selected ratio display
+    auto *sel_row = new wxBoxSizer(wxHORIZONTAL);
+    m_blend_ratio_label = new wxStaticText(panel, wxID_ANY, _L("Click a swatch above to select a ratio"));
+    m_blend_result_swatch = make_swatch(panel, *wxWHITE, wxSize(36, 24));
+    sel_row->Add(m_blend_result_swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    sel_row->Add(m_blend_ratio_label, 0, wxALIGN_CENTER_VERTICAL);
+    vs->Add(sel_row, 0, wxBOTTOM, FromDIP(4));
+
+    // Apply selection button
+    auto *apply_row = new wxBoxSizer(wxHORIZONTAL);
+    auto *apply_btn = new wxButton(panel, wxID_ANY, _L("Apply selected ratio to mix"));
+    apply_btn->Bind(wxEVT_BUTTON, &KSColorSolverDialog::on_predict_apply, this);
+    apply_row->Add(apply_btn, 0);
+    vs->Add(apply_row, 0, wxBOTTOM, FromDIP(8));
+
+    vs->Add(new wxStaticLine(panel), 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+
+    // ---- Optional: match a target colour -----------------------------------
+    vs->Add(new wxStaticText(panel, wxID_ANY,
+                _L("Match a target colour  (finds the closest swatch above):")),
+            0, wxBOTTOM, FromDIP(3));
+
+    auto *target_row = new wxBoxSizer(wxHORIZONTAL);
+    m_target_picker = new wxColourPickerCtrl(panel, wxID_ANY, *wxRED);
+    m_pred_target_swatch = make_swatch(panel, *wxRED);
+    target_row->Add(new wxStaticText(panel, wxID_ANY, _L("Target:")),
+                    0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    target_row->Add(m_target_picker, 0, wxRIGHT, FromDIP(4));
+    target_row->Add(m_pred_target_swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
+    m_pred_delta_label = new wxStaticText(panel, wxID_ANY, _L("ΔE: —"));
+    target_row->Add(m_pred_delta_label, 0, wxALIGN_CENTER_VERTICAL);
+    vs->Add(target_row, 0, wxBOTTOM, FromDIP(4));
+
+    m_target_picker->Bind(wxEVT_COLOURPICKER_CHANGED,
+        &KSColorSolverDialog::on_predict_target_changed, this);
+
+    auto *find_btn = new wxButton(panel, wxID_ANY, _L("Find closest ratio"));
+    find_btn->Bind(wxEVT_BUTTON, &KSColorSolverDialog::on_predict_solve, this);
+    vs->Add(find_btn, 0, wxBOTTOM, FromDIP(4));
+
+    // Warning / opaque-pair note
     m_pred_warn_label = new wxStaticText(panel, wxID_ANY, wxEmptyString);
     m_pred_warn_label->SetForegroundColour(wxColour(180, 60, 0));
-    vs->Add(m_pred_warn_label, 0, wxBOTTOM, FromDIP(8));
+    vs->Add(m_pred_warn_label, 0, wxBOTTOM, FromDIP(4));
 
-    // Apply button
-    m_pred_apply_btn = new wxButton(panel, wxID_ANY, _L("Apply ratio to mix"));
-    m_pred_apply_btn->Bind(wxEVT_BUTTON, &KSColorSolverDialog::on_predict_apply, this);
-    vs->Add(m_pred_apply_btn, 0);
+    // ---- Alternative pair suggestions (shown when target is outside gamut) -
+    m_suggest_hdr_label = new wxStaticText(panel, wxID_ANY, wxEmptyString);
+    m_suggest_hdr_label->SetForegroundColour(wxColour(0, 90, 160));
+    vs->Add(m_suggest_hdr_label, 0, wxBOTTOM, FromDIP(2));
+
+    m_suggest_scroll = new wxScrolledWindow(panel, wxID_ANY, wxDefaultPosition,
+                                            wxSize(-1, FromDIP(120)),
+                                            wxVSCROLL | wxBORDER_SIMPLE);
+    m_suggest_scroll->SetScrollRate(0, FromDIP(10));
+    m_suggest_scroll->SetBackgroundColour(*wxWHITE);
+    m_suggest_scroll->SetSizer(new wxBoxSizer(wxVERTICAL));
+    m_suggest_scroll->Hide();
+    vs->Add(m_suggest_scroll, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
 
     panel->SetSizer(vs);
+    rebuild_blend_strip();
     return panel;
+}
+
+// ---------------------------------------------------------------------------
+// Blend arc helpers
+// ---------------------------------------------------------------------------
+
+void KSColorSolverDialog::rebuild_blend_strip()
+{
+    FilamentColorDef a = component_a();
+    FilamentColorDef b = component_b();
+    if (a.hex_color.empty() || b.hex_color.empty()) return;
+    if (m_blend_swatches.empty()) return;
+
+    for (int i = 0; i <= 10; ++i) {
+        int ratio_b = i * 10;
+        FilamentColorDef aw = a; aw.weight = 100 - ratio_b;
+        FilamentColorDef bw = b; bw.weight = ratio_b;
+        m_blend_colors[i] = predict_mixed_color({aw, bw}, m_layer_height);
+        if (m_blend_swatches[i])
+            refresh_swatch(m_blend_swatches[i], hex_to_wxcolour(m_blend_colors[i]));
+    }
+
+    // Re-highlight selected swatch if any
+    if (m_selected_ratio >= 0)
+        select_blend_swatch(m_selected_ratio);
+
+    if (m_blend_strip_panel)
+        m_blend_strip_panel->Refresh();
+}
+
+void KSColorSolverDialog::on_blend_swatch_clicked(int ratio_b_percent)
+{
+    m_solved_ratio = ratio_b_percent;
+    select_blend_swatch(ratio_b_percent);
+}
+
+void KSColorSolverDialog::select_blend_swatch(int ratio_b_percent)
+{
+    m_selected_ratio = ratio_b_percent;
+    int idx = ratio_b_percent / 10;
+
+    // Highlight selected, un-highlight others
+    for (int i = 0; i <= 10; ++i) {
+        if (!m_blend_swatches[i]) continue;
+        wxColour border = (i == idx) ? wxColour(0, 120, 215) : wxColour(180, 180, 180);
+        m_blend_swatches[i]->SetWindowStyle(wxBORDER_SIMPLE);
+        m_blend_swatches[i]->SetBackgroundColour(
+            hex_to_wxcolour(m_blend_colors.size() > size_t(i) ? m_blend_colors[i] : "#808080"));
+        m_blend_swatches[i]->SetForegroundColour(border);
+        m_blend_swatches[i]->Refresh();
+    }
+
+    // Update result swatch and label
+    if (!m_blend_colors.empty() && idx < int(m_blend_colors.size())) {
+        refresh_swatch(m_blend_result_swatch, hex_to_wxcolour(m_blend_colors[idx]));
+    }
+    if (m_blend_ratio_label) {
+        m_blend_ratio_label->SetLabel(
+            wxString::Format("A: %d%%    B: %d%%    %s",
+                100 - ratio_b_percent, ratio_b_percent,
+                m_blend_colors.size() > size_t(idx) ? m_blend_colors[idx] : ""));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pair suggestion helpers
+// ---------------------------------------------------------------------------
+
+std::vector<KSColorSolverDialog::PairSuggestion>
+KSColorSolverDialog::compute_pair_suggestions(const std::string &target_hex) const
+{
+    std::vector<PairSuggestion> out;
+    const int n = int(m_filament_colors.size());
+    for (int ia = 0; ia < n; ++ia) {
+        for (int ib = ia + 1; ib < n; ++ib) {
+            if (ia == m_comp_a_idx && ib == m_comp_b_idx) continue; // current pair
+            FilamentColorDef a, b;
+            a.hex_color = m_filament_colors[ia];
+            a.td1s = ia < int(m_filament_td1s.size()) ? m_filament_td1s[ia] : 0.f;
+            a.weight = 1;
+            b.hex_color = m_filament_colors[ib];
+            b.td1s = ib < int(m_filament_td1s.size()) ? m_filament_td1s[ib] : 0.f;
+            b.weight = 1;
+            MixRatioResult res = solve_mix_ratio_result(target_hex, a, b, m_layer_height);
+            PairSuggestion s;
+            s.idx_a = ia; s.idx_b = ib;
+            s.best_ratio_b   = res.mix_b_percent;
+            s.best_delta_e   = res.delta_e_approx;
+            s.predicted_hex  = res.predicted_color;
+            out.push_back(s);
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const PairSuggestion &x, const PairSuggestion &y) {
+                  return x.best_delta_e < y.best_delta_e; });
+    return out;
+}
+
+void KSColorSolverDialog::show_pair_suggestions(
+    const std::vector<PairSuggestion> &suggestions)
+{
+    if (!m_suggest_scroll || !m_suggest_hdr_label) return;
+
+    m_suggest_scroll->DestroyChildren();
+    auto *sv = new wxBoxSizer(wxVERTICAL);
+
+    for (size_t i = 0; i < suggestions.size() && i < 8; ++i) {
+        const auto &s = suggestions[i];
+        auto *row = new wxBoxSizer(wxHORIZONTAL);
+
+        // Colour swatch of best achievable colour
+        auto *sw = make_swatch(m_suggest_scroll, hex_to_wxcolour(s.predicted_hex),
+                               wxSize(24, 16));
+        row->Add(sw, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+
+        wxString lbl = wxString::Format(
+            "Filament %d + Filament %d  →  A:%d%% B:%d%%  ΔE=%.1f",
+            s.idx_a + 1, s.idx_b + 1,
+            100 - s.best_ratio_b, s.best_ratio_b,
+            s.best_delta_e);
+        auto *txt = new wxStaticText(m_suggest_scroll, wxID_ANY, lbl);
+        if (i == 0) {
+            wxFont f = txt->GetFont();
+            f.SetWeight(wxFONTWEIGHT_BOLD);
+            txt->SetFont(f);
+        }
+        row->Add(txt, 1, wxALIGN_CENTER_VERTICAL);
+
+        // "Use this pair" button
+        auto *use_btn = new wxButton(m_suggest_scroll, wxID_ANY, _L("Use"),
+                                     wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        int ia = s.idx_a, ib = s.idx_b;
+        use_btn->Bind(wxEVT_BUTTON, [this, ia, ib](wxCommandEvent &) {
+            m_comp_a_idx = ia;
+            m_comp_b_idx = ib;
+            if (m_comp_a_choice) m_comp_a_choice->SetSelection(ia);
+            if (m_comp_b_choice) m_comp_b_choice->SetSelection(ib);
+            rebuild_blend_strip();
+            m_suggest_scroll->Hide();
+            m_suggest_hdr_label->SetLabel(wxEmptyString);
+            Layout(); Fit();
+        });
+        row->Add(use_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
+
+        sv->Add(row, 0, wxEXPAND | wxBOTTOM, FromDIP(3));
+    }
+
+    m_suggest_scroll->SetSizer(sv);
+    m_suggest_scroll->FitInside();
+    m_suggest_scroll->Show();
+    Layout();
+    Fit();
 }
 
 // ---------------------------------------------------------------------------
@@ -523,50 +718,56 @@ FilamentColorDef KSColorSolverDialog::component_b() const
 void KSColorSolverDialog::on_predict_target_changed(wxColourPickerEvent &evt)
 {
     refresh_swatch(m_pred_target_swatch, evt.GetColour());
+    // Auto-find the closest swatch whenever the picker changes
+    wxCommandEvent dummy;
+    on_predict_solve(dummy);
 }
 
 void KSColorSolverDialog::on_predict_solve(wxCommandEvent &)
 {
+    if (!m_target_picker) return;
     std::string target = wxcolour_to_hex(m_target_picker->GetColour());
     FilamentColorDef a = component_a();
     FilamentColorDef b = component_b();
-
-    if (a.hex_color.empty() || b.hex_color.empty()) {
-        wxMessageBox(_L("Please select two filament components."),
-                     _L("K/S Solver"), wxOK | wxICON_WARNING, this);
-        return;
-    }
+    if (a.hex_color.empty() || b.hex_color.empty()) return;
 
     MixRatioResult res = solve_mix_ratio_result(target, a, b, m_layer_height);
     m_solved_ratio = res.mix_b_percent;
 
-    wxString ratio_str = wxString::Format(
-        "A:%d%%  B:%d%%",
-        100 - res.mix_b_percent, res.mix_b_percent);
-    m_pred_ratio_label->SetLabel(ratio_str);
+    // Highlight the closest swatch on the blend arc
+    // (round to nearest 10% step)
+    int closest_step = int(std::round(res.mix_b_percent / 10.0)) * 10;
+    select_blend_swatch(closest_step);
 
-    refresh_swatch(m_pred_result_swatch, hex_to_wxcolour(res.predicted_color));
+    // ΔE indicator
+    if (m_pred_delta_label)
+        m_pred_delta_label->SetLabel(wxString::Format("ΔE: %.1f", res.delta_e_approx));
 
-    m_pred_delta_label->SetLabel(
-        wxString::Format("%.1f", res.delta_e_approx));
-
-    // Build warning text from the new diagnostic flags
+    // Warnings
     wxString warn;
-    if (res.at_gamut_boundary) {
-        warn += _L("Target colour is outside the achievable blend gamut of this\n"
-                   "A:B pair — the nearest boundary (pure A or pure B) is shown.\n"
-                   "Try a different pair of filaments to reach this target.");
+    if (res.opaque_pair)
+        warn = _L("Opaque pair: K/S predicts dark blends. In Layer-Cycle mode the "
+                  "actual print will be closer to an RGB average (much lighter).");
+
+    if (m_pred_warn_label) {
+        m_pred_warn_label->SetLabel(warn);
+        m_pred_warn_label->Show(!warn.empty());
+        if (!warn.empty()) m_pred_warn_label->Wrap(FromDIP(400));
     }
-    if (res.opaque_pair) {
-        if (!warn.empty()) warn += "\n\n";
-        warn += _L("Both filaments are opaque (TD1S = 0). K/S predicts very dark\n"
-                   "blends for complementary colours (e.g. red+blue → near-black).\n"
-                   "For Layer-Cycle mode the actual print will look much lighter\n"
-                   "— closer to a simple RGB average of the two colours.");
+
+    // If target is outside gamut, suggest better filament pairs
+    if (res.at_gamut_boundary && m_filament_colors.size() >= 3) {
+        auto suggestions = compute_pair_suggestions(target);
+        if (!suggestions.empty()) {
+            if (m_suggest_hdr_label)
+                m_suggest_hdr_label->SetLabel(
+                    _L("This pair cannot reach that colour. Better filament combinations:"));
+            show_pair_suggestions(suggestions);
+        }
+    } else {
+        if (m_suggest_scroll)  m_suggest_scroll->Hide();
+        if (m_suggest_hdr_label) m_suggest_hdr_label->SetLabel(wxEmptyString);
     }
-    m_pred_warn_label->SetLabel(warn);
-    m_pred_warn_label->Show(!warn.empty());
-    m_pred_warn_label->Wrap(FromDIP(380));
 
     Layout();
     Fit();
@@ -574,13 +775,16 @@ void KSColorSolverDialog::on_predict_solve(wxCommandEvent &)
 
 void KSColorSolverDialog::on_predict_apply(wxCommandEvent &)
 {
-    // Post a custom event so Plater can read m_solved_ratio.
-    // For now just show a message; the caller can subclass or query after EndModal.
+    if (m_selected_ratio < 0) {
+        wxMessageBox(_L("Click a swatch on the blend arc to select a ratio first."),
+                     _L("K/S Solver"), wxOK | wxICON_INFORMATION, this);
+        return;
+    }
     wxMessageBox(
         wxString::Format(
-            _L("Recommended mix: A=%d%%  B=%d%%\n\nYou can apply this ratio in the "
-               "mixed-filament row for your selected components."),
-            100 - m_solved_ratio, m_solved_ratio),
+            _L("Apply ratio  A=%d%%  B=%d%%  to the mixed-filament row for "
+               "the selected components."),
+            100 - m_selected_ratio, m_selected_ratio),
         _L("Apply ratio"), wxOK | wxICON_INFORMATION, this);
 }
 
@@ -592,6 +796,8 @@ void KSColorSolverDialog::on_calib_component_changed(wxCommandEvent &)
 {
     m_comp_a_idx = m_comp_a_choice->GetSelection();
     m_comp_b_idx = m_comp_b_choice->GetSelection();
+    // Rebuild blend arc in prediction mode too
+    rebuild_blend_strip();
     on_calib_update_predicted();
 }
 
