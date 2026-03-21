@@ -7039,7 +7039,11 @@ void Sidebar::auto_calc_flushing_volumes_internal(const int modify_id, const int
     int m_max_flush_volume = Slic3r::g_max_flush_volume;
     unsigned int m_number_of_extruders = (int)(sqrt(init_matrix.size()) + 0.001);
 
-    const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+    // Flush volume calculation operates on physical filaments only.
+    // Passing include_mixed=false prevents virtual mixed-filament slots from
+    // inflating multi_colours beyond the flush matrix dimensions, which would
+    // cause out-of-bounds writes and a hang/crash on colour change.
+    const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config(nullptr, false);
     std::vector<std::vector<wxColour>> multi_colours;
 
     // Support for multi-color filament
