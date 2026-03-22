@@ -2753,6 +2753,14 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 0. });
 
+    def = this->add("filament_ks_colour", coStrings);
+    def->label = L("Physical Colour (K/S)");
+    def->tooltip = L("Measured physical colour of the filament used for Kubelka-Munk K/S colour mixing. "
+                     "Enter as #RRGGBB. If blank, the filament's display colour is used instead.");
+    def->gui_type = ConfigOptionDef::GUIType::color;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionStrings { "" });
+
     def = this->add("filament_settings_id", coStrings);
     def->set_default_value(new ConfigOptionStrings { "" });
     //BBS: open this option to command line
@@ -4694,6 +4702,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("mixed_filament_cycle_layers", coInt);
+    def->label = L("Cycle layers");
+    def->category = L("Others");
+    def->tooltip = L("Number of layers per filament cycle when using mixed filament layer-cycle mode.");
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(4));
+
     def = this->add("mixed_filament_pointillism_pixel_size", coFloat);
     def->label = L("Pointillisme pixel size");
     def->category = L("Others");
@@ -4720,6 +4737,27 @@ void PrintConfigDef::init_fff_params()
     def->gui_flags = "serialized";
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("mixed_filament_fast_toolchange", coBool);
+    def->label = L("Fast local-Z toolchange");
+    def->category = L("Others");
+    def->tooltip = L("When enabled, local-Z unplanned toolchanges use a direct Tn command "
+                     "instead of the full wipe-tower purge path. Suitable for IDEX or tool-changer "
+                     "printers that do not need a wipe tower purge for every filament switch.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_surface_indentation", coFloat);
+    def->label = L("Selective Expansion contraction");
+    def->category = L("Others");
+    def->tooltip = L("XY offset applied to mixed-filament painted regions before region assignment.\n\n"
+                     "Positive values contract the mixed zone inward. Negative values expand it outward.\n\n"
+                     "This applies to mixed filament usage in layer cadence, height cadence, same-layer pointillisme, and local Z dithering.");
+    def->sidetext = "mm";
+    def->min = -2.0;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
 
     def = this->add("dithering_z_step_size", coFloat);
     def->label = L("Dithering Z step size");

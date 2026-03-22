@@ -115,6 +115,7 @@ public:
     // If local_z_unplanned is true, emit a wipe/toolchange without consuming the preplanned
     // per-layer wipe-tower sequence (used by Local-Z phase-b extra toolchanges).
     std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer, bool local_z_unplanned = false);
+    std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer, bool local_z_unplanned, double local_z_nominal_layer_z);
     bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
     std::string finalize(GCode &gcodegen);
     std::vector<float> used_filament_length() const;

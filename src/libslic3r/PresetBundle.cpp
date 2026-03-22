@@ -49,7 +49,11 @@ static std::vector<std::string> s_project_options {
     "flush_multiplier",
     "nozzle_volume_type",
     "filament_map_mode",
-    "filament_map"
+    "filament_map",
+    // K/S per-filament TD1S overrides (editable in sidebar, stored per-project)
+    "filament_td1s",
+    // K/S per-filament measured physical colour overrides (editable in sidebar, stored per-project)
+    "filament_ks_colour"
 };
 
 //Orca: add custom as default
@@ -4380,18 +4384,26 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
 
             color_opt->values.resize(num_filaments, "#26A69A");
 
-            // Collect per-filament TD (Transmission Distance) values from presets.
+            // Collect per-filament TD (Transmission Distance) values.
+            // Project-config sidebar overrides take priority over filament preset values.
             std::vector<float> td1s_vals;
             td1s_vals.reserve(filament_presets.size());
-            for (const std::string &fp_name : filament_presets) {
-                const Preset *fp = this->filaments.find_preset(fp_name);
-                float td = 0.f;
-                if (fp) {
-                    const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
-                    if (td_opt && !td_opt->values.empty())
-                        td = float(td_opt->values[0]);
+            {
+                const auto *proj_td = this->project_config.option<ConfigOptionFloats>("filament_td1s");
+                for (int fi = 0; fi < (int)filament_presets.size(); ++fi) {
+                    float td = 0.f;
+                    if (proj_td && fi < (int)proj_td->values.size())
+                        td = float(proj_td->values[fi]);
+                    if (td == 0.f) {
+                        const Preset *fp = this->filaments.find_preset(filament_presets[fi]);
+                        if (fp) {
+                            const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
+                            if (td_opt && !td_opt->values.empty())
+                                td = float(td_opt->values[0]);
+                        }
+                    }
+                    td1s_vals.push_back(td);
                 }
-                td1s_vals.push_back(td);
             }
             const float lh = float(this->prints.get_edited_preset().config.opt_float("layer_height"));
 

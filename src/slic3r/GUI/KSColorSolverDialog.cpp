@@ -69,7 +69,10 @@ static float approx_delta_e(const std::string &a, const std::string &b)
 KSColorSolverDialog::KSColorSolverDialog(wxWindow               *parent,
                                          const std::vector<std::string> &filament_colors,
                                          const std::vector<float>       &filament_td1s,
-                                         float                           layer_height)
+                                         float                           layer_height,
+                                         int                             initial_ratio_b,
+                                         int                             initial_comp_a,
+                                         int                             initial_comp_b)
     : DPIDialog(parent, wxID_ANY, _L("K/S Colour Solver"),
                 wxDefaultPosition, wxDefaultSize,
                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
@@ -77,8 +80,21 @@ KSColorSolverDialog::KSColorSolverDialog(wxWindow               *parent,
     , m_filament_td1s(filament_td1s)
     , m_layer_height(layer_height)
 {
+    // Apply component selection from caller (e.g. from a configured mixed filament row)
+    const int n = int(filament_colors.size());
+    if (initial_comp_a >= 0 && initial_comp_a < n) m_comp_a_idx = initial_comp_a;
+    if (initial_comp_b >= 0 && initial_comp_b < n) m_comp_b_idx = initial_comp_b;
+
     SetBackgroundColour(*wxWHITE);
     build_ui();
+
+    // Pre-select the blend arc swatch at the configured mix ratio
+    if (initial_ratio_b >= 0 && initial_ratio_b <= 100) {
+        // Round to nearest 10% step that the swatch strip covers
+        int snapped = (initial_ratio_b / 10) * 10;
+        on_blend_swatch_clicked(snapped);
+    }
+
     Fit();
     CentreOnParent();
 }
@@ -126,8 +142,9 @@ void KSColorSolverDialog::build_ui()
         m_comp_a_choice->Append(label);
         m_comp_b_choice->Append(label);
     }
-    if (m_filament_colors.size() >= 1) m_comp_a_choice->SetSelection(0);
-    if (m_filament_colors.size() >= 2) m_comp_b_choice->SetSelection(1);
+    // Use m_comp_a_idx / m_comp_b_idx which may have been set by the constructor
+    if (m_comp_a_idx < int(m_filament_colors.size())) m_comp_a_choice->SetSelection(m_comp_a_idx);
+    if (m_comp_b_idx < int(m_filament_colors.size())) m_comp_b_choice->SetSelection(m_comp_b_idx);
 
     m_comp_a_choice->Bind(wxEVT_CHOICE, &KSColorSolverDialog::on_calib_component_changed, this);
     m_comp_b_choice->Bind(wxEVT_CHOICE, &KSColorSolverDialog::on_calib_component_changed, this);

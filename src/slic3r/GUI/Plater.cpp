@@ -44,6 +44,7 @@
 #include <wx/string.h>
 #include <wx/wupdlock.h>
 #include <wx/numdlg.h>
+#include <wx/spinctrl.h>
 #include <wx/debug.h>
 #include <wx/busyinfo.h>
 #include <wx/event.h>
@@ -461,6 +462,8 @@ struct Sidebar::priv
 
     PlaterPresetComboBox *combo_print = nullptr;
     std::vector<PlaterPresetComboBox*> combos_filament;
+    std::vector<wxSpinCtrlDouble*>     td1s_spinners;   // per-filament TD1S spinners
+    std::vector<wxColourPickerCtrl*>   ks_colour_pickers; // per-filament K/S physical colour pickers
     int editing_filament = -1;
     wxBoxSizer *sizer_filaments = nullptr;
 
@@ -496,7 +499,14 @@ struct Sidebar::priv
     bool                m_mixed_filaments_collapsed = false;      // Collapse state
     bool                m_skip_mixed_filament_sync_once = false;  // Local edits already mutated manager in place.
     std::unordered_set<size_t> m_expanded_mixed_filament_rows;    // Expanded row editors
-    wxStaticLine* m_staticline2;
+    struct MixedFilamentRowBinding {
+        size_t    mixed_id = size_t(-1);
+        wxWindow *row      = nullptr;
+    };
+    std::vector<MixedFilamentRowBinding> m_mixed_filament_row_bindings;
+    std::vector<uint64_t>                m_mixed_filament_ui_order;
+    bool                                 m_mixed_filament_drag_active = false;
+    size_t                               m_mixed_filament_drag_source_mixed_id = size_t(-1);
     wxPanel* m_panel_project_title;
     ScalableButton* m_filament_icon = nullptr;
     Button * m_flushing_volume_btn = nullptr;
@@ -2226,23 +2236,51 @@ Sidebar::Sidebar(Plater *parent)
     p->m_btn_ks_solver->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         if (!wxGetApp().preset_bundle) return;
         auto *preset_bundle = wxGetApp().preset_bundle;
-        // Collect physical colours
+        // Collect physical colours: prefer filament_ks_colour from preset (the
+        // measured/physical colour for K/S mixing), fall back to the display colour.
         ConfigOptionStrings *co = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
         std::vector<std::string> colors = co ? co->values : std::vector<std::string>();
-        // Collect TD1S values from filament presets
+        // Collect TD1S values: sidebar overrides (project_config) take priority,
+        // fall back to the filament preset value.
         std::vector<float> td1s_vals;
-        for (const std::string &fp_name : preset_bundle->filament_presets) {
-            const Preset *fp = preset_bundle->filaments.find_preset(fp_name);
+        const auto *proj_td = preset_bundle->project_config.option<ConfigOptionFloats>("filament_td1s");
+        for (int fi = 0; fi < (int)preset_bundle->filament_presets.size(); ++fi) {
             float td = 0.f;
-            if (fp) {
+            // Check sidebar spinner value stored in project_config
+            if (proj_td && fi < (int)proj_td->values.size())
+                td = float(proj_td->values[fi]);
+            const Preset *fp = preset_bundle->filaments.find_preset(preset_bundle->filament_presets[fi]);
+            // Fall back to preset TD if not overridden
+            if (td == 0.f && fp) {
                 const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
                 if (td_opt && !td_opt->values.empty())
                     td = float(td_opt->values[0]);
             }
             td1s_vals.push_back(td);
+            // Override display colour with measured K/S colour if set in preset
+            if (fp) {
+                const auto *ks_col = fp->config.option<ConfigOptionStrings>("filament_ks_colour");
+                if (ks_col && !ks_col->values.empty() && !ks_col->values[0].empty()
+                    && fi < (int)colors.size())
+                    colors[fi] = ks_col->values[0];
+            }
         }
         float lh = float(preset_bundle->prints.get_edited_preset().config.opt_float("layer_height"));
-        GUI::KSColorSolverDialog dlg(this, colors, td1s_vals, lh);
+        // Pre-populate dialog from the first enabled mixed filament so the user
+        // sees the actual configured ratio/pair rather than defaults.
+        int initial_ratio_b = -1;
+        int initial_comp_a  = -1;
+        int initial_comp_b  = -1;
+        for (const auto &mf : preset_bundle->mixed_filaments.mixed_filaments()) {
+            if (mf.enabled) {
+                initial_ratio_b = mf.mix_b_percent;
+                initial_comp_a  = static_cast<int>(mf.component_a) - 1; // 0-based
+                initial_comp_b  = static_cast<int>(mf.component_b) - 1;
+                break;
+            }
+        }
+        GUI::KSColorSolverDialog dlg(this, colors, td1s_vals, lh,
+                                     initial_ratio_b, initial_comp_a, initial_comp_b);
         dlg.ShowModal();
     });
 
@@ -2507,11 +2545,120 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filame
 
     combo_and_btn_sizer->AddSpacer(FromDIP(SidebarProps::ContentMargin()));
 
+    // ---- TD1S spinner row ------------------------------------------------
+    // Read initial value: project_config first (user-set), then filament preset.
+    float td1s_init = 0.f;
+    if (wxGetApp().preset_bundle) {
+        auto *td_opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionFloats>("filament_td1s");
+        if (td_opt && filament_idx < (int)td_opt->values.size())
+            td1s_init = float(td_opt->values[filament_idx]);
+        if (td1s_init == 0.f) {
+            // Fall back to the filament preset value
+            if (filament_idx < (int)wxGetApp().preset_bundle->filament_presets.size()) {
+                const Preset *fp = wxGetApp().preset_bundle->filaments.find_preset(
+                    wxGetApp().preset_bundle->filament_presets[filament_idx]);
+                if (fp) {
+                    const auto *popt = fp->config.option<ConfigOptionFloats>("filament_td1s");
+                    if (popt && !popt->values.empty())
+                        td1s_init = float(popt->values[0]);
+                }
+            }
+        }
+    }
+
+    // Read K/S physical colour: project_config override first, then preset, then display colour.
+    wxColour ks_init_colour(*wxWHITE);
+    if (wxGetApp().preset_bundle) {
+        auto *ks_proj = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_ks_colour");
+        if (ks_proj && filament_idx < (int)ks_proj->values.size() && !ks_proj->values[filament_idx].empty())
+            ks_init_colour = wxColour(ks_proj->values[filament_idx]);
+        else if (filament_idx < (int)wxGetApp().preset_bundle->filament_presets.size()) {
+            const Preset *fp = wxGetApp().preset_bundle->filaments.find_preset(
+                wxGetApp().preset_bundle->filament_presets[filament_idx]);
+            if (fp) {
+                const auto *ks_opt = fp->config.option<ConfigOptionStrings>("filament_ks_colour");
+                if (ks_opt && !ks_opt->values.empty() && !ks_opt->values[0].empty())
+                    ks_init_colour = wxColour(ks_opt->values[0]);
+            }
+        }
+        // Fall back to the filament display colour if no K/S colour is set
+        if (!ks_init_colour.IsOk() || ks_init_colour == *wxWHITE) {
+            auto *col_opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+            if (col_opt && filament_idx < (int)col_opt->values.size() && !col_opt->values[filament_idx].empty())
+                ks_init_colour = wxColour(col_opt->values[filament_idx]);
+        }
+    }
+
+    auto td1s_row = new wxBoxSizer(wxHORIZONTAL);
+    int  margin_l = (filament_idx % 2) == 0 ? FromDIP(12) : 0;
+    td1s_row->AddSpacer(margin_l);
+
+    // Colour picker for the physical/measured K/S colour of this filament
+    auto *ks_picker = new wxColourPickerCtrl(p->m_panel_filament_content, wxID_ANY,
+                                              ks_init_colour, wxDefaultPosition,
+                                              wxSize(FromDIP(28), FromDIP(22)));
+    ks_picker->SetToolTip(_L("Physical colour of this filament for K/S colour mixing. "
+                              "Click to change. Leave as display colour if not measured."));
+    td1s_row->Add(ks_picker, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+
+    auto *td1s_lbl = new wxStaticText(p->m_panel_filament_content, wxID_ANY, _L("TD:"));
+    td1s_lbl->SetToolTip(_L("Transmission Distance for Kubelka-Munk K/S blending (mm, 1.75mm filament).  0 = opaque / not set."));
+    td1s_row->Add(td1s_lbl, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(2));
+
+    auto *td1s_spin = new wxSpinCtrlDouble(p->m_panel_filament_content, wxID_ANY,
+        wxEmptyString, wxDefaultPosition, wxSize(FromDIP(60), FromDIP(22)),
+        wxSP_ARROW_KEYS, 0.0, 20.0, double(td1s_init), 0.1);
+    td1s_spin->SetDigits(2);
+    td1s_spin->SetToolTip(_L("Transmission Distance for Kubelka-Munk K/S blending (mm, 1.75mm filament).  0 = opaque / not set."));
+    td1s_row->Add(td1s_spin, 0, wxALIGN_CENTER_VERTICAL);
+    auto *td1s_unit = new wxStaticText(p->m_panel_filament_content, wxID_ANY, _L("mm"));
+    td1s_row->Add(td1s_unit, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(2));
+    td1s_row->AddSpacer(FromDIP(SidebarProps::ContentMargin()));
+
+    // Grow td1s_spinners if needed and register
+    while ((int)p->td1s_spinners.size() <= filament_idx)
+        p->td1s_spinners.push_back(nullptr);
+    p->td1s_spinners[filament_idx] = td1s_spin;
+
+    td1s_spin->Bind(wxEVT_SPINCTRLDOUBLE, [this, filament_idx](wxSpinDoubleEvent &e) {
+        if (!wxGetApp().preset_bundle) return;
+        auto *td_opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionFloats>("filament_td1s");
+        if (!td_opt) return;
+        while (filament_idx >= (int)td_opt->values.size())
+            td_opt->values.push_back(0.0);
+        td_opt->values[filament_idx] = e.GetValue();
+        // Refresh mixed-filament display colors which depend on TD1S
+        update_mixed_filament_panel(false);
+    });
+
+    // Grow ks_colour_pickers if needed and register
+    while ((int)p->ks_colour_pickers.size() <= filament_idx)
+        p->ks_colour_pickers.push_back(nullptr);
+    p->ks_colour_pickers[filament_idx] = ks_picker;
+
+    ks_picker->Bind(wxEVT_COLOURPICKER_CHANGED, [this, filament_idx](wxColourPickerEvent &e) {
+        if (!wxGetApp().preset_bundle) return;
+        auto *ks_opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_ks_colour");
+        if (!ks_opt) return;
+        while (filament_idx >= (int)ks_opt->values.size())
+            ks_opt->values.push_back("");
+        const wxColour col = e.GetColour();
+        ks_opt->values[filament_idx] = wxString::Format("#%02X%02X%02X",
+            col.Red(), col.Green(), col.Blue()).ToStdString();
+        // Refresh mixed-filament display colours which depend on filament colours
+        update_mixed_filament_panel(false);
+    });
+
+    // Wrap combo row + TD1S row in a vertical sizer
+    auto row_vsizer = new wxBoxSizer(wxVERTICAL);
+    row_vsizer->Add(combo_and_btn_sizer, 0, wxEXPAND);
+    row_vsizer->Add(td1s_row, 0, wxEXPAND | wxBOTTOM, FromDIP(2));
+
     // BBS:  filament double columns
     auto side = filament_idx % 2;
     auto /***/sizer_filaments = this->p->sizer_filaments->GetItem(side)->GetSizer();
     if (side == 1 && filament_idx > 1) sizer_filaments->Remove(filament_idx / 2);
-    sizer_filaments->Add(combo_and_btn_sizer, 1, wxEXPAND);
+    sizer_filaments->Add(row_vsizer, 1, wxEXPAND);
     if (side == 0 && filament_idx > 0) {
         sizer_filaments = this->p->sizer_filaments->GetItem(1)->GetSizer();
         sizer_filaments->AddStretchSpacer(1);
@@ -2528,6 +2675,11 @@ void Sidebar::remove_unused_filament_combos(const size_t current_extruder_count)
         sizer_filaments->Remove(last / 2);
         (*p->combos_filament[last]).Destroy();
         p->combos_filament.pop_back();
+        // Keep td1s_spinners and ks_colour_pickers in sync with combos_filament
+        if (!p->td1s_spinners.empty())
+            p->td1s_spinners.pop_back();
+        if (!p->ks_colour_pickers.empty())
+            p->ks_colour_pickers.pop_back();
     }
     // BBS:  filament double columns
     auto sizer_filaments0 = this->p->sizer_filaments->GetItem((size_t)0)->GetSizer();
@@ -4010,6 +4162,7 @@ private:
     void build_ui();
     void update_preview();
     void on_apply();
+    void update_component_picker_visuals();
 
     size_t                          m_mixed_id;
     MixedFilament                   m_mf;
@@ -4022,6 +4175,12 @@ private:
     wxChoice                       *m_choice_b = nullptr;
     wxChoice                       *m_choice_c = nullptr;
     wxChoice                       *m_choice_d = nullptr;
+    wxPanel                        *m_picker_a_container = nullptr;
+    wxPanel                        *m_picker_b_container = nullptr;
+    wxPanel                        *m_picker_a_swatch = nullptr;
+    wxPanel                        *m_picker_b_swatch = nullptr;
+    wxStaticText                   *m_picker_a_label = nullptr;
+    wxStaticText                   *m_picker_b_label = nullptr;
     wxChoice                       *m_distribution_choice = nullptr;
     MixedGradientSelector          *m_blend_selector = nullptr;
     wxStaticText                   *m_blend_label = nullptr;
@@ -4034,6 +4193,7 @@ private:
     wxStaticText                   *m_mix_summary_label = nullptr;
     wxPanel                        *m_swatch = nullptr;
     std::shared_ptr<std::vector<int>> m_selected_weight_state;
+    OnChangeFn                         m_on_change;
 
     // Helper functions (copied from update_mixed_filament_panel)
     static std::vector<unsigned int> decode_gradient_ids(const std::string &s);
@@ -4522,9 +4682,6 @@ void MixedFilamentConfigPanel::build_ui()
     chk->Bind(wxEVT_CHECKBOX, [this, chk](wxCommandEvent&) { m_mf.enabled = chk->GetValue(); });
     root->Add(chk_row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, gap);
 
-    // Buttons
-    root->Add(CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, gap);
-
     // Bind events
     auto apply_changes = [this]() {
         m_has_changes = true;
@@ -4788,6 +4945,32 @@ void MixedFilamentConfigPanel::update_preview()
     }
 }
 
+static std::vector<size_t> build_mixed_filament_ui_indices(const std::vector<MixedFilament> &mixed,
+                                                           const std::vector<uint64_t>      &preferred_order)
+{
+    std::vector<size_t> ordered_indices;
+    std::vector<bool>   used(mixed.size(), false);
+
+    for (const uint64_t stable_id : preferred_order) {
+        for (size_t idx = 0; idx < mixed.size(); ++idx) {
+            const MixedFilament &entry = mixed[idx];
+            if (used[idx] || entry.deleted || entry.stable_id != stable_id)
+                continue;
+            used[idx] = true;
+            ordered_indices.emplace_back(idx);
+            break;
+        }
+    }
+
+    for (size_t idx = 0; idx < mixed.size(); ++idx) {
+        if (used[idx] || mixed[idx].deleted)
+            continue;
+        ordered_indices.emplace_back(idx);
+    }
+
+    return ordered_indices;
+}
+
 } // namespace
 
 void Sidebar::update_mixed_filament_panel(bool sync_manager)
@@ -4919,6 +5102,25 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
             opt->value = enabled ? 1 : 0;
         else
             preset_bundle->project_config.set_key_value("mixed_filament_gradient_mode", new ConfigOptionBool(enabled));
+    };
+    auto get_mixed_int = [preset_bundle, print_cfg](const std::string &key, int fallback) {
+        if (preset_bundle->project_config.has(key))
+            return preset_bundle->project_config.opt_int(key);
+        if (print_cfg && print_cfg->has(key))
+            return print_cfg->opt_int(key);
+        return fallback;
+    };
+    auto set_mixed_int = [preset_bundle, print_cfg](const std::string &key, int value) {
+        if (print_cfg) {
+            if (ConfigOptionInt *opt = print_cfg->option<ConfigOptionInt>(key))
+                opt->value = value;
+            else
+                print_cfg->set_key_value(key, new ConfigOptionInt(value));
+        }
+        if (ConfigOptionInt *opt = preset_bundle->project_config.option<ConfigOptionInt>(key))
+            opt->value = value;
+        else
+            preset_bundle->project_config.set_key_value(key, new ConfigOptionInt(value));
     };
     auto notify_mixed_change = [print_cfg]() {
         if (!print_cfg)
@@ -5217,18 +5419,24 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     bool  advanced_dithering = get_mixed_bool("mixed_filament_advanced_dithering", false);
     const std::string mixed_definitions = get_mixed_string("mixed_filament_definitions");
 
-    // Collect per-filament TD values from the current filament presets.
+    // Collect per-filament TD values: project_config (sidebar spinners) first,
+    // fall back to the filament preset value.
     std::vector<float> td1s_vals;
     {
+        const auto *proj_td = preset_bundle->project_config.option<ConfigOptionFloats>("filament_td1s");
         const auto &fp_names = preset_bundle->filament_presets;
         td1s_vals.reserve(fp_names.size());
-        for (const std::string &fp_name : fp_names) {
-            const Preset *fp = preset_bundle->filaments.find_preset(fp_name);
+        for (int fi = 0; fi < (int)fp_names.size(); ++fi) {
             float td = 0.f;
-            if (fp) {
-                const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
-                if (td_opt && !td_opt->values.empty())
-                    td = float(td_opt->values[0]);
+            if (proj_td && fi < (int)proj_td->values.size())
+                td = float(proj_td->values[fi]);
+            if (td == 0.f) {
+                const Preset *fp = preset_bundle->filaments.find_preset(fp_names[fi]);
+                if (fp) {
+                    const auto *td_opt = fp->config.option<ConfigOptionFloats>("filament_td1s");
+                    if (td_opt && !td_opt->values.empty())
+                        td = float(td_opt->values[0]);
+                }
             }
             td1s_vals.push_back(td);
         }
@@ -5270,8 +5478,27 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     p->m_mixed_filament_drag_source_mixed_id = size_t(-1);
     p->m_mixed_filament_row_bindings.clear();
 
+    // Get the content sizer and clear it
+    wxSizer *content_sizer = p->m_panel_mixed_filaments_content->GetSizer();
+    if (content_sizer)
+        content_sizer->Clear(true);
+
+    // Re-add the top margin spacer that was added in constructor but cleared above
+    if (content_sizer)
+        content_sizer->AddSpacer(FromDIP(SidebarProps::ContentMargin()));
+
+    const int compact_gap_x   = FromDIP(6);
+    const int compact_gap_y   = FromDIP(4);
+    const int compact_row_pad = FromDIP(6);
+    const bool is_dark = wxGetApp().dark_mode();
+    const wxColour mixed_rows_bg = is_dark ? wxColour(45, 45, 49) : wxColour(246, 248, 251);
+    const wxColour mixed_row_bg = is_dark ? wxColour(52, 52, 56) : wxColour(255, 255, 255);
+    const wxColour mixed_row_hover_bg = is_dark ? wxColour(62, 62, 68) : wxColour(241, 247, 255);
+    const wxColour mixed_text_fg = is_dark ? wxColour(232, 232, 232) : wxColour(20, 20, 20);
+    const wxColour mixed_summary_fg = is_dark ? wxColour(182, 182, 182) : wxColour(96, 96, 96);
+
     // Header with title and add buttons (gradient / pattern).
-    auto *header_row = new wxPanel(p->m_panel_mixed_filaments, wxID_ANY);
+    auto *header_row = new wxPanel(p->m_panel_mixed_filaments_content, wxID_ANY);
     header_row->SetBackgroundColour(wxColour(255, 255, 255));
     auto *header_sizer = new wxBoxSizer(wxHORIZONTAL);
     auto *mixed_title = new wxStaticText(header_row, wxID_ANY, _L("Mixed Filaments"));
@@ -5297,15 +5524,6 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
                 row.gradient_component_ids.clear();
             }
         }
-
-    // Get the content sizer and clear it
-    wxSizer *content_sizer = p->m_panel_mixed_filaments_content->GetSizer();
-    if (content_sizer)
-        content_sizer->Clear(true);
-    
-    // Re-add the top margin spacer that was added in constructor but cleared above
-    if (content_sizer)
-        content_sizer->AddSpacer(FromDIP(SidebarProps::ContentMargin()));
 
         set_mixed_string("mixed_filament_definitions", mgr.serialize_custom_entries());
         notify_mixed_change();
@@ -5333,9 +5551,9 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     header_sizer->Add(add_pattern_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
 
     header_row->SetSizer(header_sizer);
-    p->m_sizer_mixed_filaments->AddSpacer(FromDIP(2));
-    p->m_sizer_mixed_filaments->Add(header_row, 0, wxEXPAND);
-    p->m_sizer_mixed_filaments->AddSpacer(FromDIP(2));
+    p->m_sizer_mixed_filaments_content->AddSpacer(FromDIP(2));
+    p->m_sizer_mixed_filaments_content->Add(header_row, 0, wxEXPAND);
+    p->m_sizer_mixed_filaments_content->AddSpacer(FromDIP(2));
 
     if (mixed.empty()) {
         p->m_panel_mixed_filaments_title->Hide();
@@ -5351,6 +5569,9 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     
     // Reset the max size in case it was collapsed
     p->m_panel_mixed_filaments_content->SetMaxSize({-1, -1});
+
+    auto *settings_row = new wxPanel(p->m_panel_mixed_filaments_content, wxID_ANY);
+    auto *settings_sizer = new wxBoxSizer(wxHORIZONTAL);
 
     settings_sizer->Add(new wxStaticText(settings_row, wxID_ANY, _L("Lower")), 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
     auto *lower_spin = new wxSpinCtrlDouble(settings_row, wxID_ANY, wxEmptyString, wxDefaultPosition,
@@ -5379,15 +5600,29 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     gap_spin->SetToolTip(_L("Optional spacing between pointillisme line segments (mm)."));
     settings_sizer->Add(gap_spin, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(3));
     settings_row->SetSizer(settings_sizer);
-    p->m_sizer_mixed_filaments->Add(settings_row, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(4));
-    p->m_sizer_mixed_filaments->AddSpacer(FromDIP(2));
+    p->m_sizer_mixed_filaments_content->Add(settings_row, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(4));
+    p->m_sizer_mixed_filaments_content->AddSpacer(FromDIP(2));
 
-    auto *rows_scroller = new wxScrolledWindow(p->m_panel_mixed_filaments, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL | wxTAB_TRAVERSAL);
+    auto *rows_scroller = new wxScrolledWindow(p->m_panel_mixed_filaments_content, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL | wxTAB_TRAVERSAL);
     rows_scroller->SetScrollRate(0, FromDIP(8));
     rows_scroller->ShowScrollbars(wxSHOW_SB_NEVER, wxSHOW_SB_DEFAULT);
     rows_scroller->SetBackgroundColour(mixed_rows_bg);
     auto *rows_sizer = new wxBoxSizer(wxVERTICAL);
     rows_scroller->SetSizer(rows_sizer);
+
+    auto adjust_rows_scroller_height = [rows_scroller, this]() {
+        if (!rows_scroller)
+            return;
+        const int max_h = FromDIP(320);
+        const int virtual_h = rows_scroller->GetVirtualSize().GetHeight();
+        const int new_h = std::min(virtual_h, max_h);
+        rows_scroller->SetMinSize(wxSize(-1, std::max(new_h, FromDIP(40))));
+        if (p->m_panel_mixed_filaments_content)
+            p->m_panel_mixed_filaments_content->Layout();
+        if (m_scrolled_sizer)
+            m_scrolled_sizer->Layout();
+        Layout();
+    };
 
     auto apply_settings = [this, preset_bundle, get_mixed_mode, get_mixed_bool, lower_spin, upper_spin, cycle_spin, pixel_spin, gap_spin,
                            set_mixed_int, set_mixed_float, set_mixed_string, notify_mixed_change]() {
@@ -5412,7 +5647,7 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         set_mixed_float("mixed_filament_pointillism_line_gap", gap);
 
         auto &mgr = preset_bundle->mixed_filaments;
-        mgr.apply_gradient_settings(mode, lo, hi, cycle, advanced);
+        mgr.apply_gradient_settings(mode, lo, hi, advanced);
         set_mixed_string("mixed_filament_definitions", mgr.serialize_custom_entries());
         notify_mixed_change();
 
@@ -5441,558 +5676,6 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     cycle_spin->Bind(wxEVT_KILL_FOCUS, [apply_settings](wxFocusEvent &evt) { apply_settings(); evt.Skip(); });
     pixel_spin->Bind(wxEVT_KILL_FOCUS, [apply_settings](wxFocusEvent &evt) { apply_settings(); evt.Skip(); });
     gap_spin->Bind(wxEVT_KILL_FOCUS, [apply_settings](wxFocusEvent &evt) { apply_settings(); evt.Skip(); });
-
-    for (size_t mixed_id = 0; mixed_id < mixed.size(); ++mixed_id) {
-        MixedFilament &mf = mixed[mixed_id];
-        auto *row = new wxPanel(rows_scroller, wxID_ANY);
-        row->SetBackgroundColour(wxColour(255, 255, 255));
-        auto *row_sizer = new wxBoxSizer(wxHORIZONTAL);
-
-        auto *content_sizer = new wxBoxSizer(wxVERTICAL);
-        auto *title_row = new wxBoxSizer(wxHORIZONTAL);
-
-        wxColour swatch_color(mf.display_color);
-        auto *swatch = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(14), FromDIP(14)));
-        swatch->SetBackgroundColour(swatch_color);
-        swatch->SetMinSize(wxSize(FromDIP(14), FromDIP(14)));
-        title_row->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(4));
-
-        const int virtual_filament_id = int(num_physical + mixed_id + 1);
-        auto *name_label = new wxStaticText(row, wxID_ANY, wxString::Format("Mixed Filament %d", virtual_filament_id));
-        title_row->Add(name_label, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
-
-        if (!mf.custom) {
-            auto *pair_label = new wxStaticText(row, wxID_ANY, wxString::Format("(Filament %u + Filament %u)",
-                                                                                 unsigned(mf.component_a), unsigned(mf.component_b)));
-            title_row->Add(pair_label, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
-        }
-        content_sizer->Add(title_row, 0, wxEXPAND);
-
-        if (mf.custom) {
-            wxArrayString filament_choices;
-            for (size_t i = 0; i < num_physical; ++i)
-                filament_choices.Add(wxString::Format("Filament %d", int(i + 1)));
-
-            const int component_a = std::clamp(int(mf.component_a), 1, int(num_physical));
-            const int component_b = std::clamp(int(mf.component_b), 1, int(num_physical));
-
-            auto *choice_a = new wxChoice(row, wxID_ANY, wxDefaultPosition, wxDefaultSize, filament_choices);
-            auto *choice_b = new wxChoice(row, wxID_ANY, wxDefaultPosition, wxDefaultSize, filament_choices);
-            choice_a->SetSelection(component_a - 1);
-            choice_b->SetSelection(component_b - 1);
-
-            auto *picker_row = new wxBoxSizer(wxHORIZONTAL);
-            picker_row->Add(choice_a, 1, wxALIGN_CENTER_VERTICAL);
-            picker_row->Add(new wxStaticText(row, wxID_ANY, "+"), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(6));
-            picker_row->Add(choice_b, 1, wxALIGN_CENTER_VERTICAL);
-            content_sizer->Add(picker_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-            const std::string normalized_pattern = MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern);
-            const bool pattern_row_mode = !normalized_pattern.empty();
-            MixedGradientSelector *blend_selector = nullptr;
-            wxStaticText *blend_label = nullptr;
-            wxTextCtrl *pattern_ctrl = nullptr;
-            wxChoice *choice_c = nullptr;
-            wxChoice *choice_d = nullptr;
-            wxButton *add_extra_color_btn = nullptr;
-            wxChoice *distribution_choice = nullptr;
-            MixedMixPreview *mix_preview = nullptr;
-            wxStaticText *mix_summary_label = nullptr;
-            wxChoice *pattern_insert_choice = nullptr;
-            wxButton *pattern_insert_btn = nullptr;
-            std::vector<wxButton*> pattern_quick_filament_buttons;
-            auto selected_weight_state = std::make_shared<std::vector<int>>();
-
-            const int row_distribution_mode = std::clamp(mf.distribution_mode,
-                                                         int(MixedFilament::LayerCycle),
-                                                         int(MixedFilament::Simple));
-            wxArrayString distribution_choices;
-            distribution_choices.Add(_L("Layer cycling"));
-            distribution_choices.Add(_L("Same-layer pointillisme"));
-            distribution_choices.Add(_L("Simple"));
-            auto *distribution_row = new wxBoxSizer(wxHORIZONTAL);
-            distribution_row->Add(new wxStaticText(row, wxID_ANY, _L("Mode")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-            distribution_choice = new wxChoice(row, wxID_ANY, wxDefaultPosition, wxDefaultSize, distribution_choices);
-            distribution_choice->SetSelection(row_distribution_mode);
-            distribution_choice->SetToolTip(_L("Choose whether this mixed row alternates by layer or interleaves colors on the same layer."));
-            distribution_row->Add(distribution_choice, 1, wxALIGN_CENTER_VERTICAL);
-            content_sizer->Add(distribution_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-            if (pattern_row_mode) {
-                auto *pattern_row = new wxBoxSizer(wxHORIZONTAL);
-                pattern_row->Add(new wxStaticText(row, wxID_ANY, _L("Pattern")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-                pattern_ctrl = new wxTextCtrl(row, wxID_ANY, from_u8(normalized_pattern), wxDefaultPosition,
-                                              wxSize(FromDIP(170), -1), wxTE_PROCESS_ENTER);
-                pattern_ctrl->SetToolTip(_L("Manual repeating pattern. Use 1/2 or A/B for component A/B, "
-                                            "and 3..9 for direct physical filament IDs. "
-                                            "Example: 1/1/1/1/2/2/2/2 or 1/2/3/4."));
-                pattern_row->Add(pattern_ctrl, 1, wxALIGN_CENTER_VERTICAL);
-                content_sizer->Add(pattern_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-                auto *insert_row = new wxBoxSizer(wxHORIZONTAL);
-                insert_row->Add(new wxStaticText(row, wxID_ANY, _L("Insert")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-                pattern_insert_choice = new wxChoice(row, wxID_ANY, wxDefaultPosition, wxDefaultSize, filament_choices);
-                pattern_insert_choice->SetSelection(component_a - 1);
-                pattern_insert_choice->SetToolTip(_L("Select a physical filament to append into the pattern."));
-                insert_row->Add(pattern_insert_choice, 1, wxALIGN_CENTER_VERTICAL);
-                pattern_insert_btn = new wxButton(row, wxID_ANY, "+", wxDefaultPosition, wxSize(FromDIP(28), FromDIP(24)), wxBU_EXACTFIT);
-                pattern_insert_btn->SetToolTip(_L("Append selected filament ID to pattern"));
-                insert_row->Add(pattern_insert_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
-                content_sizer->Add(insert_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-                auto *quick_row = new wxBoxSizer(wxHORIZONTAL);
-                quick_row->Add(new wxStaticText(row, wxID_ANY, _L("Filaments")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-                auto *quick_buttons = new wxBoxSizer(wxHORIZONTAL);
-                for (size_t fid = 0; fid < num_physical; ++fid) {
-                    wxButton *btn = new wxButton(row, wxID_ANY, wxString::Format("%d", int(fid + 1)),
-                                                 wxDefaultPosition, wxSize(FromDIP(24), FromDIP(22)), wxBU_EXACTFIT);
-                    const wxColour chip_color = parse_mixed_color(physical_colors[fid]);
-                    btn->SetBackgroundColour(chip_color);
-                    btn->SetToolTip(wxString::Format(_L("Append filament %d to pattern"), int(fid + 1)));
-                    quick_buttons->Add(btn, 0, wxRIGHT, FromDIP(4));
-                    pattern_quick_filament_buttons.emplace_back(btn);
-                }
-                quick_row->Add(quick_buttons, 1, wxALIGN_CENTER_VERTICAL);
-                content_sizer->Add(quick_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-            } else {
-                wxArrayString optional_filament_choices;
-                optional_filament_choices.Add(_L("None"));
-                for (size_t i = 0; i < num_physical; ++i)
-                    optional_filament_choices.Add(wxString::Format("Filament %d", int(i + 1)));
-
-                const bool simple_mode = row_distribution_mode == int(MixedFilament::Simple);
-                std::vector<unsigned int> selected_gradient_ids = simple_mode ? std::vector<unsigned int>() : decode_gradient_ids(mf.gradient_component_ids);
-                if (selected_gradient_ids.size() < 3)
-                    selected_gradient_ids.clear();
-                if (selected_gradient_ids.empty()) {
-                    selected_gradient_ids.emplace_back(unsigned(component_a));
-                    if (component_b != component_a)
-                        selected_gradient_ids.emplace_back(unsigned(component_b));
-                }
-                const bool multi_gradient_mode = selected_gradient_ids.size() >= 3;
-                int selection_c = 0;
-                int selection_d = 0;
-                if (selected_gradient_ids.size() >= 3)
-                    selection_c = int(selected_gradient_ids[2]);
-                if (selected_gradient_ids.size() >= 4)
-                    selection_d = int(selected_gradient_ids[3]);
-                *selected_weight_state = normalize_gradient_weights(
-                    decode_gradient_weights(mf.gradient_component_weights, selected_gradient_ids.size()),
-                    selected_gradient_ids.size());
-
-                wxColour color_a = parse_mixed_color(physical_colors[size_t(component_a - 1)]);
-                wxColour color_b = parse_mixed_color(physical_colors[size_t(component_b - 1)]);
-                blend_selector = new MixedGradientSelector(row, color_a, color_b, std::clamp(mf.mix_b_percent, 0, 100));
-                auto *blend_row = new wxBoxSizer(wxHORIZONTAL);
-                blend_row->Add(blend_selector, 1, wxEXPAND);
-                content_sizer->Add(blend_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-                const bool same_layer_mode = row_distribution_mode == int(MixedFilament::SameLayerPointillisme);
-                blend_label = new wxStaticText(row, wxID_ANY, multi_gradient_mode ?
-                                               wxString::Format(same_layer_mode ? _L("%d-color pointillisme") : _L("%d-color layer cycle"),
-                                                                int(selected_gradient_ids.size())) :
-                                               wxString::Format(simple_mode ? _L("Simple %d%%/%d%%") :
-                                                                (same_layer_mode ? _L("Pointillisme %d%%/%d%%") : _L("%d%%/%d%%")),
-                                                                100 - std::clamp(mf.mix_b_percent, 0, 100),
-                                                                std::clamp(mf.mix_b_percent, 0, 100)));
-                auto *ratio_row = new wxBoxSizer(wxHORIZONTAL);
-                ratio_row->AddStretchSpacer(1);
-                ratio_row->Add(blend_label, 0, wxALIGN_CENTER_VERTICAL);
-                content_sizer->Add(ratio_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-                if (num_physical >= 3 && !simple_mode) {
-                    add_extra_color_btn = new wxButton(row, wxID_ANY, "+", wxDefaultPosition, wxSize(FromDIP(24), FromDIP(22)), wxBU_EXACTFIT);
-                    add_extra_color_btn->SetToolTip(_L("Add an extra filament color to this gradient"));
-                    picker_row->Add(add_extra_color_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
-                    auto *extra_row = new wxBoxSizer(wxHORIZONTAL);
-                    extra_row->Add(new wxStaticText(row, wxID_ANY, _L("Extra colors")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-                    choice_c = new wxChoice(row, wxID_ANY, wxDefaultPosition, wxDefaultSize, optional_filament_choices);
-                    choice_d = new wxChoice(row, wxID_ANY, wxDefaultPosition, wxDefaultSize, optional_filament_choices);
-                    choice_c->SetSelection(std::clamp(selection_c, 0, int(num_physical)));
-                    choice_d->SetSelection(std::clamp(selection_d, 0, int(num_physical)));
-                    choice_c->SetToolTip(_L("Select a third filament for multi-color gradient mixing."));
-                    choice_d->SetToolTip(_L("Select a fourth filament for multi-color gradient mixing."));
-                    extra_row->Add(choice_c, 1, wxALIGN_CENTER_VERTICAL);
-                    extra_row->Add(new wxStaticText(row, wxID_ANY, "+"), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(6));
-                    extra_row->Add(choice_d, 1, wxALIGN_CENTER_VERTICAL);
-                    content_sizer->Add(extra_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-                }
-
-                if (blend_selector) {
-                    std::vector<wxColour> corner_colors;
-                    corner_colors.reserve(selected_gradient_ids.size());
-                    for (const unsigned int id : selected_gradient_ids) {
-                        if (id >= 1 && id <= physical_colors.size())
-                            corner_colors.emplace_back(parse_mixed_color(physical_colors[id - 1]));
-                    }
-                    if (!simple_mode && corner_colors.size() >= 3)
-                        blend_selector->set_multi_preview(corner_colors, *selected_weight_state);
-                }
-            }
-
-            auto *preview_row = new wxBoxSizer(wxHORIZONTAL);
-            preview_row->Add(new wxStaticText(row, wxID_ANY, _L("Preview")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-            mix_preview = new MixedMixPreview(row);
-            preview_row->Add(mix_preview, 1, wxALIGN_CENTER_VERTICAL);
-            content_sizer->Add(preview_row, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-            mix_summary_label = new wxStaticText(row, wxID_ANY, wxEmptyString);
-            mix_summary_label->SetForegroundColour(wxColour(90, 90, 90));
-            content_sizer->Add(mix_summary_label, 0, wxEXPAND | wxLEFT | wxTOP, FromDIP(8));
-
-            {
-                std::vector<unsigned int> initial_sequence;
-                const bool initial_simple_mode = row_distribution_mode == int(MixedFilament::Simple);
-                if (pattern_row_mode) {
-                    initial_sequence = decode_manual_pattern_ids(normalized_pattern, unsigned(component_a), unsigned(component_b));
-                } else {
-                    std::vector<unsigned int> initial_gradient_ids = initial_simple_mode ? std::vector<unsigned int>() : decode_gradient_ids(mf.gradient_component_ids);
-                    if (initial_gradient_ids.size() >= 3)
-                        initial_sequence = build_weighted_multi_sequence(initial_gradient_ids, *selected_weight_state);
-                    else
-                        initial_sequence = build_weighted_pair_sequence(unsigned(component_a), unsigned(component_b), std::clamp(mf.mix_b_percent, 0, 100));
-                }
-
-                if (mix_preview) {
-                    std::vector<wxColour> palette;
-                    palette.reserve(physical_colors.size());
-                    for (const std::string &hex : physical_colors)
-                        palette.emplace_back(parse_mixed_color(hex));
-                    mix_preview->set_data(palette,
-                                          initial_sequence,
-                                          row_distribution_mode == int(MixedFilament::SameLayerPointillisme),
-                                          wxColour(mf.display_color));
-                }
-                if (mix_summary_label) {
-                    const std::string summary = summarize_sequence(initial_sequence);
-                    mix_summary_label->SetLabel(summary.empty() ? _L("No mix sequence") : from_u8(summary));
-                }
-            }
-
-            auto apply_custom_row = [this, preset_bundle, mixed_id, choice_a, choice_b, choice_c, choice_d,
-                                     add_extra_color_btn, distribution_choice, blend_selector, blend_label, pattern_ctrl, swatch,
-                                     mix_preview, mix_summary_label, num_physical, pattern_row_mode,
-                                     decode_gradient_ids, encode_gradient_ids, decode_manual_pattern_ids,
-                                     decode_gradient_weights, normalize_gradient_weights, encode_gradient_weights,
-                                     build_weighted_pair_sequence, build_weighted_multi_sequence,
-                                     summarize_sequence, blend_from_sequence,
-                                     get_mixed_mode, get_mixed_int, get_mixed_float, get_mixed_bool,
-                                     set_mixed_string, notify_mixed_change, selected_weight_state, physical_colors, row](bool refresh_panel) {
-                if (num_physical < 1)
-                    return;
-
-                auto &mgr = preset_bundle->mixed_filaments;
-                auto &mfs = mgr.mixed_filaments();
-                if (mixed_id >= mfs.size())
-                    return;
-
-                int a = std::clamp(choice_a->GetSelection() + 1, 1, int(num_physical));
-                int b = std::clamp(choice_b->GetSelection() + 1, 1, int(num_physical));
-                if (a == b && num_physical > 1) {
-                    b = (a == int(num_physical)) ? 1 : a + 1;
-                    choice_b->SetSelection(b - 1);
-                }
-
-                MixedFilament &cur = mfs[mixed_id];
-                cur.component_a = unsigned(a);
-                cur.component_b = unsigned(b);
-                cur.distribution_mode = distribution_choice ?
-                    std::clamp(distribution_choice->GetSelection(),
-                               int(MixedFilament::LayerCycle),
-                               int(MixedFilament::Simple)) :
-                    int(MixedFilament::Simple);
-                const bool simple_mode = cur.distribution_mode == int(MixedFilament::Simple);
-                const bool same_layer_mode = cur.distribution_mode == int(MixedFilament::SameLayerPointillisme);
-                std::vector<unsigned int> preview_sequence;
-
-                if (pattern_row_mode) {
-                    std::string normalized = MixedFilamentManager::normalize_manual_pattern(into_u8(pattern_ctrl->GetValue()));
-                    if (normalized.empty())
-                        normalized = "12";
-                    if (into_u8(pattern_ctrl->GetValue()) != normalized)
-                        pattern_ctrl->ChangeValue(from_u8(normalized));
-                    cur.manual_pattern = normalized;
-                    const int count_b = int(std::count(normalized.begin(), normalized.end(), '2'));
-                    cur.mix_b_percent = std::clamp((100 * count_b + int(normalized.size()) / 2) / std::max(1, int(normalized.size())), 0, 100);
-                    cur.pointillism_all_filaments = false;
-                    cur.gradient_component_ids.clear();
-                    cur.gradient_component_weights.clear();
-                    preview_sequence = decode_manual_pattern_ids(cur.manual_pattern, cur.component_a, cur.component_b);
-                } else {
-                    std::vector<unsigned int> selected_ids;
-                    selected_ids.reserve(4);
-                    auto add_unique = [&selected_ids](unsigned int id) {
-                        if (id == 0)
-                            return;
-                        if (std::find(selected_ids.begin(), selected_ids.end(), id) == selected_ids.end())
-                            selected_ids.emplace_back(id);
-                    };
-                    add_unique(unsigned(a));
-                    add_unique(unsigned(b));
-                    if (!simple_mode) {
-                        if (choice_c && choice_c->GetSelection() > 0)
-                            add_unique(unsigned(choice_c->GetSelection()));
-                        if (choice_d && choice_d->GetSelection() > 0)
-                            add_unique(unsigned(choice_d->GetSelection()));
-                    } else {
-                        if (choice_c)
-                            choice_c->SetSelection(0);
-                        if (choice_d)
-                            choice_d->SetSelection(0);
-                    }
-                    const bool multi_gradient_mode = selected_ids.size() >= 3;
-                    cur.mix_b_percent = std::clamp(blend_selector ? blend_selector->value() : 50, 0, 100);
-                    cur.manual_pattern.clear();
-                    cur.pointillism_all_filaments = false;
-                    if (multi_gradient_mode) {
-                        const std::vector<int> decoded_weights =
-                            decode_gradient_weights(cur.gradient_component_weights, selected_ids.size());
-                        if (selected_weight_state->size() != selected_ids.size())
-                            *selected_weight_state = decoded_weights;
-                        *selected_weight_state = normalize_gradient_weights(*selected_weight_state, selected_ids.size());
-                        cur.gradient_component_ids = encode_gradient_ids(selected_ids);
-                        cur.gradient_component_weights = encode_gradient_weights(*selected_weight_state);
-                        preview_sequence = build_weighted_multi_sequence(selected_ids, *selected_weight_state);
-                    } else {
-                        cur.gradient_component_ids.clear();
-                        cur.gradient_component_weights.clear();
-                    }
-                    preview_sequence = multi_gradient_mode ?
-                        preview_sequence :
-                        build_weighted_pair_sequence(cur.component_a, cur.component_b, cur.mix_b_percent);
-                }
-                cur.custom = true;
-
-                ConfigOptionStrings *co = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
-                std::vector<std::string> colors = co ? co->values : std::vector<std::string>();
-                colors.resize(num_physical, "#26A69A");
-
-                wxColour color_a_wx = parse_mixed_color(colors[size_t(a - 1)]);
-                wxColour color_b_wx = parse_mixed_color(colors[size_t(b - 1)]);
-                if (blend_selector)
-                    blend_selector->set_colors(color_a_wx, color_b_wx);
-
-                const std::vector<unsigned int> selected_gradient_ids = decode_gradient_ids(cur.gradient_component_ids);
-                if (preview_sequence.empty())
-                    preview_sequence = build_weighted_pair_sequence(cur.component_a, cur.component_b, cur.mix_b_percent);
-                if (blend_selector) {
-                    std::vector<wxColour> corner_colors;
-                    corner_colors.reserve(selected_gradient_ids.size());
-                    for (const unsigned int id : selected_gradient_ids) {
-                        if (id >= 1 && id <= colors.size())
-                            corner_colors.emplace_back(parse_mixed_color(colors[id - 1]));
-                    }
-                    if (!simple_mode && corner_colors.size() >= 3)
-                        blend_selector->set_multi_preview(corner_colors, *selected_weight_state);
-                }
-                if (selected_gradient_ids.size() >= 3 || !preview_sequence.empty()) {
-                    cur.display_color = blend_from_sequence(colors, preview_sequence, "#26A69A");
-                    if (blend_label) {
-                        if (selected_gradient_ids.size() >= 3) {
-                            blend_label->SetLabel(wxString::Format(same_layer_mode ? _L("%d-color pointillisme") : _L("%d-color layer cycle"),
-                                                                   int(selected_gradient_ids.size())));
-                        } else {
-                            blend_label->SetLabel(wxString::Format(simple_mode ? _L("Simple %d%%/%d%%") :
-                                                                   (same_layer_mode ? _L("Pointillisme %d%%/%d%%") : _L("%d%%/%d%%")),
-                                                                   100 - cur.mix_b_percent, cur.mix_b_percent));
-                        }
-                    }
-                } else {
-                    cur.display_color = MixedFilamentManager::blend_color(colors[size_t(a - 1)], colors[size_t(b - 1)], 100 - cur.mix_b_percent, cur.mix_b_percent);
-                    if (blend_label)
-                        blend_label->SetLabel(wxString::Format(simple_mode ? _L("Simple %d%%/%d%%") :
-                                                               (same_layer_mode ? _L("Pointillisme %d%%/%d%%") : _L("%d%%/%d%%")),
-                                                               100 - cur.mix_b_percent, cur.mix_b_percent));
-                }
-
-                if (mix_preview) {
-                    std::vector<wxColour> palette;
-                    palette.reserve(colors.size());
-                    for (const std::string &hex : colors)
-                        palette.emplace_back(parse_mixed_color(hex));
-                    mix_preview->set_data(palette, preview_sequence, same_layer_mode, wxColour(cur.display_color));
-                }
-                if (mix_summary_label) {
-                    const std::string summary = summarize_sequence(preview_sequence);
-                    mix_summary_label->SetLabel(summary.empty() ? _L("No mix sequence") : from_u8(summary));
-                }
-                swatch->SetBackgroundColour(wxColour(cur.display_color));
-                swatch->Refresh();
-
-                int mode = get_mixed_mode(false) ? 1 : 0;
-                float lo = get_mixed_float("mixed_filament_height_lower_bound", 0.04f);
-                float hi = get_mixed_float("mixed_filament_height_upper_bound", 0.16f);
-                int cycle = get_mixed_int("mixed_filament_cycle_layers", 4);
-                bool advanced = get_mixed_bool("mixed_filament_advanced_dithering", false);
-                mode = std::clamp(mode, 0, 1);
-                lo = std::max(0.01f, lo);
-                hi = std::max(lo, hi);
-                cycle = std::max(2, cycle);
-                mgr.apply_gradient_settings(mode, lo, hi, cycle, advanced);
-
-                set_mixed_string("mixed_filament_definitions", mgr.serialize_custom_entries());
-                notify_mixed_change();
-
-                if (refresh_panel) {
-                    this->CallAfter([this]() {
-                        update_dynamic_filament_list();
-                        update_mixed_filament_panel();
-                    });
-                } else {
-                    this->CallAfter([this]() { update_dynamic_filament_list(); });
-                }
-            };
-
-            choice_a->Bind(wxEVT_CHOICE, [apply_custom_row](wxCommandEvent &) { apply_custom_row(true); });
-            choice_b->Bind(wxEVT_CHOICE, [apply_custom_row](wxCommandEvent &) { apply_custom_row(true); });
-            if (distribution_choice)
-                distribution_choice->Bind(wxEVT_CHOICE, [apply_custom_row](wxCommandEvent &) { apply_custom_row(true); });
-            if (choice_c)
-                choice_c->Bind(wxEVT_CHOICE, [apply_custom_row](wxCommandEvent &) { apply_custom_row(true); });
-            if (choice_d)
-                choice_d->Bind(wxEVT_CHOICE, [apply_custom_row](wxCommandEvent &) { apply_custom_row(true); });
-            if (blend_selector)
-                blend_selector->Bind(wxEVT_SLIDER, [apply_custom_row](wxCommandEvent &) { apply_custom_row(false); });
-            if (add_extra_color_btn && choice_c && choice_d) {
-                add_extra_color_btn->Bind(wxEVT_BUTTON, [choice_a, choice_b, choice_c, choice_d, num_physical, apply_custom_row](wxCommandEvent &) {
-                    std::vector<int> used;
-                    used.reserve(4);
-                    auto append_used = [&used](int id) {
-                        if (id <= 0)
-                            return;
-                        if (std::find(used.begin(), used.end(), id) == used.end())
-                            used.emplace_back(id);
-                    };
-                    append_used(choice_a ? (choice_a->GetSelection() + 1) : 0);
-                    append_used(choice_b ? (choice_b->GetSelection() + 1) : 0);
-                    append_used(choice_c ? choice_c->GetSelection() : 0);
-                    append_used(choice_d ? choice_d->GetSelection() : 0);
-                    auto find_first_free = [&used, num_physical]() -> int {
-                        for (int id = 1; id <= int(num_physical); ++id) {
-                            if (std::find(used.begin(), used.end(), id) == used.end())
-                                return id;
-                        }
-                        return 0;
-                    };
-
-                    if (choice_c->GetSelection() <= 0) {
-                        const int free_id = find_first_free();
-                        if (free_id > 0) {
-                            choice_c->SetSelection(free_id);
-                            apply_custom_row(true);
-                        }
-                        return;
-                    }
-                    if (choice_d->GetSelection() <= 0) {
-                        const int free_id = find_first_free();
-                        if (free_id > 0) {
-                            choice_d->SetSelection(free_id);
-                            apply_custom_row(true);
-                        }
-                    }
-                });
-            }
-            if (blend_selector) {
-                blend_selector->Bind(wxEVT_BUTTON, [this, row, blend_selector, choice_a, choice_b, choice_c, choice_d,
-                                                    num_physical, selected_weight_state, normalize_gradient_weights,
-                                                    physical_colors, apply_custom_row](wxCommandEvent &) {
-                    if (!blend_selector->is_multi_mode())
-                        return;
-
-                    std::vector<unsigned int> selected_ids;
-                    selected_ids.reserve(4);
-                    auto add_unique = [&selected_ids](unsigned int id) {
-                        if (id == 0)
-                            return;
-                        if (std::find(selected_ids.begin(), selected_ids.end(), id) == selected_ids.end())
-                            selected_ids.emplace_back(id);
-                    };
-                    add_unique(unsigned(std::clamp(choice_a ? (choice_a->GetSelection() + 1) : 0, 1, int(num_physical))));
-                    add_unique(unsigned(std::clamp(choice_b ? (choice_b->GetSelection() + 1) : 0, 1, int(num_physical))));
-                    if (choice_c && choice_c->GetSelection() > 0)
-                        add_unique(unsigned(choice_c->GetSelection()));
-                    if (choice_d && choice_d->GetSelection() > 0)
-                        add_unique(unsigned(choice_d->GetSelection()));
-                    if (selected_ids.size() < 3)
-                        return;
-
-                    std::vector<wxColour> palette;
-                    palette.reserve(physical_colors.size());
-                    for (const std::string &hex : physical_colors)
-                        palette.emplace_back(parse_mixed_color(hex));
-
-                    const std::vector<int> initial_weights = normalize_gradient_weights(*selected_weight_state, selected_ids.size());
-                    MixedGradientWeightsDialog dlg(row, selected_ids, palette, initial_weights);
-                    if (dlg.ShowModal() != wxID_OK)
-                        return;
-
-                    *selected_weight_state = dlg.normalized_weights();
-                    apply_custom_row(false);
-                });
-            }
-            if (pattern_ctrl) {
-                auto append_pattern_token = [pattern_ctrl](int filament_id) {
-                    if (!pattern_ctrl || filament_id <= 0)
-                        return;
-                    std::string pattern = into_u8(pattern_ctrl->GetValue());
-                    if (!pattern.empty()) {
-                        const char last = pattern.back();
-                        const bool has_sep = last == '/' || last == '-' || last == '_' || last == '|' || last == ':' || last == ';' || last == ',' || last == ' ';
-                        if (!has_sep)
-                            pattern.push_back('/');
-                    }
-                    pattern += std::to_string(filament_id);
-                    pattern_ctrl->ChangeValue(from_u8(pattern));
-                };
-
-                pattern_ctrl->Bind(wxEVT_TEXT_ENTER, [apply_custom_row](wxCommandEvent &) { apply_custom_row(true); });
-                pattern_ctrl->Bind(wxEVT_KILL_FOCUS, [apply_custom_row](wxFocusEvent &evt) { apply_custom_row(true); evt.Skip(); });
-                if (pattern_insert_btn && pattern_insert_choice) {
-                    pattern_insert_btn->Bind(wxEVT_BUTTON, [apply_custom_row, append_pattern_token, pattern_insert_choice](wxCommandEvent &) {
-                        const int sel = pattern_insert_choice->GetSelection();
-                        if (sel >= 0) {
-                            append_pattern_token(sel + 1);
-                            apply_custom_row(true);
-                        }
-                    });
-                }
-                for (size_t fid = 0; fid < pattern_quick_filament_buttons.size(); ++fid) {
-                    wxButton *btn = pattern_quick_filament_buttons[fid];
-                    if (!btn)
-                        continue;
-                    const int filament_id = int(fid + 1);
-                    btn->Bind(wxEVT_BUTTON, [apply_custom_row, append_pattern_token, filament_id](wxCommandEvent &) {
-                        append_pattern_token(filament_id);
-                        apply_custom_row(true);
-                    });
-                }
-            }
-        }
-
-        row_sizer->Add(content_sizer, 1, wxEXPAND);
-
-        auto *chk = new wxCheckBox(row, wxID_ANY, wxEmptyString);
-        chk->SetValue(mf.enabled);
-        row_sizer->Add(chk, 0, wxALIGN_TOP | wxLEFT | wxRIGHT | wxTOP, FromDIP(2));
-        chk->Bind(wxEVT_CHECKBOX, [this, preset_bundle, mixed_id, chk, set_mixed_string, notify_mixed_change](wxCommandEvent &) {
-            auto &mgr = preset_bundle->mixed_filaments;
-            auto &mfs = mgr.mixed_filaments();
-            if (mixed_id < mfs.size())
-                mfs[mixed_id].enabled = chk->GetValue();
-
-            set_mixed_string("mixed_filament_definitions", mgr.serialize_custom_entries());
-            notify_mixed_change();
-
-            this->CallAfter([this]() {
-                update_dynamic_filament_list();
-                update_mixed_filament_panel();
-            });
-        });
-
-        row->SetSizer(row_sizer);
-        rows_sizer->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(4));
-        rows_sizer->AddSpacer(FromDIP(1));
-    }
 
     std::vector<wxColour> palette;
     palette.reserve(physical_colors.size());
@@ -6068,9 +5751,9 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         mgr.apply_gradient_settings(mode, lo, hi, advanced);
         update_dynamic_filament_list();
 
-        if (rebuild_virtual_id_remap && wxGetApp().plater()) {
+        if (rebuild_virtual_id_remap) {
             p->m_skip_mixed_filament_sync_once = true;
-            wxGetApp().plater()->on_filaments_change(num_physical);
+            on_filaments_change(num_physical);
         }
     };
 
@@ -6111,6 +5794,21 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         row->SetBackgroundColour(mixed_row_bg);
         auto *row_sizer = new wxBoxSizer(wxVERTICAL);
         p->m_mixed_filament_row_bindings.push_back({mixed_id, row});
+
+        auto set_row_hover = [row, mixed_row_bg, mixed_row_hover_bg](bool hovered) {
+            if (!row)
+                return;
+            row->SetBackgroundColour(hovered ? mixed_row_hover_bg : mixed_row_bg);
+            row->Refresh();
+        };
+        auto row_contains_mouse = [row]() -> bool {
+            if (!row)
+                return false;
+            const wxPoint mouse = wxGetMousePosition();
+            const wxPoint top_left = row->ClientToScreen(wxPoint(0, 0));
+            const wxSize sz = row->GetSize();
+            return wxRect(top_left, sz).Contains(mouse);
+        };
 
         auto *header_panel = new wxPanel(row, wxID_ANY);
         header_panel->SetBackgroundColour(mixed_row_bg);
@@ -6179,7 +5877,14 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
             apply_mixed_entry_changes(mixed_id, updated, false, true);
         });
 
-        auto *del_btn = new ScalableButton(header_panel, wxID_ANY, "cross"); 
+        auto *drag_handle = new wxStaticText(header_panel, wxID_ANY, wxString(L"\u2630"),
+                                              wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+        drag_handle->SetForegroundColour(mixed_summary_fg);
+        drag_handle->SetCursor(wxCursor(wxCURSOR_SIZING));
+        drag_handle->SetToolTip(_L("Drag to reorder"));
+        header_sizer->Add(drag_handle, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, compact_gap_x);
+
+        auto *del_btn = new ScalableButton(header_panel, wxID_ANY, "cross");
         del_btn->SetToolTip(_L("Delete mixed filament"));
         header_sizer->Add(del_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, compact_gap_x);
         
@@ -6188,44 +5893,17 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
                  auto &mgr = wxGetApp().preset_bundle->mixed_filaments;
                  auto &mfs = mgr.mixed_filaments();
                  if (mixed_id < mfs.size()) {
+                     const auto old_mixed = mfs;
                      mfs.erase(mfs.begin() + mixed_id);
-                     
-                     if (ConfigOptionString *opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
-                        opt->value = mgr.serialize_custom_entries();
-
-                         if (tombstoned_existing_auto) {
-                             mfs.erase(mfs.begin() + mixed_id);
-                         } else {
-                             target.component_a = target_pair.first;
-                             target.component_b = target_pair.second;
-                             target.mix_b_percent = 50;
-                             target.ratio_a = 1;
-                             target.ratio_b = 1;
-                             target.manual_pattern.clear();
-                             target.gradient_component_ids.clear();
-                             target.gradient_component_weights.clear();
-                             target.pointillism_all_filaments = false;
-                             target.distribution_mode = int(MixedFilament::Simple);
-                             target.custom = false;
-                             target.origin_auto = true;
-                             target.deleted = true;
-                             target.enabled = false;
-                         }
-                     } else if (target.custom) {
-                         mfs.erase(mfs.begin() + mixed_id);
-                     } else {
-                         target.deleted = true;
-                         target.enabled = false;
-                     }
                      p->m_expanded_mixed_filament_rows.clear();
                      set_mixed_string("mixed_filament_definitions", mgr.serialize_custom_entries());
                      wxGetApp().preset_bundle->update_mixed_filament_id_remap(old_mixed, num_physical, num_physical);
                      notify_mixed_change();
                      if (wxGetApp().plater())
                          wxGetApp().plater()->update_project_dirty_from_presets();
-                     if (wxGetApp().plater()) {
+                     {
                          p->m_skip_mixed_filament_sync_once = true;
-                         wxGetApp().plater()->on_filaments_change(num_physical);
+                         on_filaments_change(num_physical);
                      }
                  }
              }
@@ -6234,24 +5912,31 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
         header_panel->SetSizer(header_sizer);
         row_sizer->Add(header_panel, 0, wxEXPAND | wxALL, 0);
 
-        // Clicking on the row (header panel) opens the configuration dialog
-        header_panel->Bind(wxEVT_LEFT_UP, [this, mixed_id, num_physical, physical_colors, preset_bundle](wxMouseEvent &) {
+        // Editor host panel (lazy, hidden until row is expanded)
+        auto *editor_host = new wxPanel(row, wxID_ANY);
+        auto *editor_sizer = new wxBoxSizer(wxVERTICAL);
+        editor_host->SetSizer(editor_sizer);
+        editor_host->Hide();
+        row_sizer->Add(editor_host, 0, wxEXPAND | wxALL, 0);
+
+        // ensure_editor: lazily create the MixedFilamentConfigPanel inside editor_host
+        auto ensure_editor = [this, mixed_id, num_physical, physical_colors, preset_bundle, editor_host, editor_sizer,
+                               palette, swatch, summary_label, header_panel, row, rows_scroller, mixed_summary_text, apply_mixed_entry_changes]() {
+            if (editor_sizer->GetItemCount() > 0)
+                return; // already created
             auto &mgr = preset_bundle->mixed_filaments;
             auto &mfs = mgr.mixed_filaments();
             if (mixed_id >= mfs.size())
                 return;
-
             auto *editor = new MixedFilamentConfigPanel(editor_host, mixed_id, mfs[mixed_id], num_physical, physical_colors, palette,
                 [this, mixed_id, swatch, summary_label, header_panel, row, rows_scroller, mixed_summary_text, apply_mixed_entry_changes](const MixedFilament &updated_mf) {
                     apply_mixed_entry_changes(mixed_id, updated_mf, true);
-
                     if (swatch) {
                         swatch->SetBackgroundColour(parse_mixed_color(updated_mf.display_color));
                         swatch->Refresh();
                     }
-                    if (summary_label) {
+                    if (summary_label)
                         summary_label->SetLabel(mixed_summary_text(updated_mf));
-                    }
                     if (header_panel)
                         header_panel->Layout();
                     if (row)
@@ -6261,10 +5946,11 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
                         rows_scroller->FitInside();
                     }
                 });
-
             editor_sizer->Add(editor, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(4));
             editor_host->Layout();
         };
+
+        // Note: header_panel click is handled via bind_toggle_target below
 
         auto toggle_editor = [this, mixed_id, editor_host, ensure_editor, rows_scroller, adjust_rows_scroller_height]() {
             if (!editor_host || !rows_scroller)

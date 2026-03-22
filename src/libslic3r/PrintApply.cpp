@@ -1425,7 +1425,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_mixed_filament_mgr.apply_gradient_settings(mixed_gradient_mode,
                                                  mixed_height_lower,
                                                  mixed_height_upper,
-                                                 mixed_cycle_layers,
                                                  mixed_advanced_dither);
     size_t mixed_custom_count = 0;
     for (const auto &mf : m_mixed_filament_mgr.mixed_filaments())
@@ -1839,6 +1838,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     used_facet_states[state_idx] |= volume_used_facet_states[state_idx];
             }
 
+            size_t dropped_painted_states = 0;
             for (size_t state_idx = static_cast<size_t>(EnforcerBlockerType::Extruder1); state_idx < used_facet_states.size(); ++state_idx) {
                 if (!used_facet_states[state_idx])
                     continue;

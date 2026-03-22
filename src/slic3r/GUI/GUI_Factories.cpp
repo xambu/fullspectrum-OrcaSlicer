@@ -1582,7 +1582,10 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
 
     wxMenu* sub_menu = new wxMenu();
     std::vector<wxBitmap*> icons = get_extruder_color_icons(true);
-    int filaments_cnt = Sidebar::should_show_SEMM_buttons() ? icons.size() : 0;
+    // Clamp to physical filament count: filament_presets only contains physical presets,
+    // but icons may include virtual mixed-filament entries which would cause OOB access.
+    const int physical_cnt = static_cast<int>(wxGetApp().preset_bundle->filament_presets.size());
+    int filaments_cnt = Sidebar::should_show_SEMM_buttons() ? std::min((int)icons.size(), physical_cnt) : 0;
     for (int i = 0; i < filaments_cnt; i++) {
         if (i == active_filament_menu_id)
             continue;

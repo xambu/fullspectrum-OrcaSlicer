@@ -1026,6 +1026,11 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig& config
             }
         }
         else {
+            // Guard against missing options (e.g. new keys not yet in old preset JSONs)
+            if (config.option(opt_key) == nullptr) {
+                ret = double_to_string(0.0);
+                break;
+            }
             double val = opt->type == coFloats ?
                 config.opt_float(opt_key, idx) :
                 opt->type == coFloat ? config.opt_float(opt_key) :
@@ -1185,6 +1190,11 @@ boost::any ConfigOptionsGroup::get_config_value2(const DynamicPrintConfig& confi
     case coPercents:
     case coFloats:
     case coFloat:{
+        // Guard against missing options (e.g. new keys not yet in old preset JSONs)
+        if (config.option(opt_key) == nullptr) {
+            ret = 0.0;
+            break;
+        }
         double val = opt->type == coFloats ?
             config.opt_float(opt_key, idx) :
             opt->type == coFloat ? config.opt_float(opt_key) :

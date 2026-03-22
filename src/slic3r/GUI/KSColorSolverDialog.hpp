@@ -44,13 +44,18 @@ namespace Slic3r { namespace GUI {
 class KSColorSolverDialog : public DPIDialog
 {
 public:
-    // filament_colors : current physical filament colours as "#RRGGBB" strings.
-    // filament_td1s   : corresponding TD1S values (0 = not set).
-    // layer_height    : current print layer height in mm.
+    // filament_colors   : current physical filament colours as "#RRGGBB" strings.
+    // filament_td1s     : corresponding TD1S values (0 = not set).
+    // layer_height      : current print layer height in mm.
+    // initial_ratio_b   : pre-select blend arc swatch at this B% (from configured mix ratio, -1 = none).
+    // initial_comp_a/b  : pre-select component dropdowns (0-based index, -1 = default 0/1).
     KSColorSolverDialog(wxWindow               *parent,
                         const std::vector<std::string> &filament_colors,
                         const std::vector<float>       &filament_td1s,
-                        float                           layer_height);
+                        float                           layer_height,
+                        int                             initial_ratio_b  = -1,
+                        int                             initial_comp_a   = -1,
+                        int                             initial_comp_b   = -1);
 
 private:
     // ---- UI helpers -------------------------------------------------------

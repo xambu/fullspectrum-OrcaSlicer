@@ -973,13 +973,21 @@ bool PlaterPresetComboBox::switch_to_tab()
     const Preset* selected_filament_preset = nullptr;
     if (m_type == Preset::TYPE_FILAMENT)
     {
+        // Guard: GetSelection() can return wxNOT_FOUND (-1) if the combo has no
+        // active selection; passing -1 as unsigned to GetString() is UB / crash.
+        if (GetSelection() == wxNOT_FOUND)
+            return false;
         const std::string& selected_preset = GetString(GetSelection()).ToUTF8().data();
         if (!boost::algorithm::starts_with(selected_preset, Preset::suffix_modified()))
         {
             const std::string& preset_name = wxGetApp().preset_bundle->filaments.get_preset_name_by_alias(selected_preset);
-            if (wxGetApp().get_tab(m_type)->select_preset(preset_name))
-                wxGetApp().get_tab(m_type)->get_combo_box()->set_filament_idx(m_filament_idx);
-            else {
+            Tab* filament_tab = wxGetApp().get_tab(m_type);
+            if (!filament_tab) return false;  // tab could have been closed between checks
+            if (filament_tab->select_preset(preset_name)) {
+                Tab* tab2 = wxGetApp().get_tab(m_type);
+                if (tab2 && tab2->get_combo_box())
+                    tab2->get_combo_box()->set_filament_idx(m_filament_idx);
+            } else {
                 return false;
             }
         }

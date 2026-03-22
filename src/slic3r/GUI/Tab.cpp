@@ -3889,6 +3889,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_shrinkage_compensation_z", "material_basic_information#shrinkage-z");
         optgroup->append_single_option_line("filament_cost", "material_basic_information#price");
         optgroup->append_single_option_line("filament_td1s");
+        optgroup->append_single_option_line("filament_ks_colour");
         //BBS
         optgroup->append_single_option_line("temperature_vitrification", "material_basic_information#softening-temperature");
         optgroup->append_single_option_line("idle_temperature", "material_basic_information#idle-temperature");

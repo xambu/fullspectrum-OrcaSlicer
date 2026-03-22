@@ -1091,13 +1091,14 @@ void MixedFilamentManager::load_custom_entries(const std::string              &s
         bool enabled = true;
         bool custom = true;
         bool origin_auto = false;
+        bool deleted = false;
         int mix = 50;
         bool pointillism_all_filaments = false;
         std::string gradient_component_ids;
         std::string gradient_component_weights;
         std::string manual_pattern;
         int distribution_mode = int(MixedFilament::Simple);
-        if (!parse_row_definition(row, a, b, enabled, custom, mix, pointillism_all_filaments,
+        if (!parse_row_definition(row, a, b, stable_id, enabled, custom, origin_auto, mix, pointillism_all_filaments,
                                   gradient_component_ids, gradient_component_weights, manual_pattern, distribution_mode)) {
             ++skipped_rows;
             BOOST_LOG_TRIVIAL(warning) << "MixedFilamentManager::load_custom_entries invalid row format: " << row;

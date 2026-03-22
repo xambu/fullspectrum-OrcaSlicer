@@ -678,7 +678,28 @@ void Preview::load_print_as_fff(bool keep_z_range, bool only_gcode)
     const bool gcode_preview_data_valid = !m_gcode_result->moves.empty();
     const bool is_pregcode_preview = !gcode_preview_data_valid && wxGetApp().is_editor();
 
-    const std::vector<std::string> tool_colors = wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result);
+    std::vector<std::string> tool_colors = wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result);
+    // For mixed-filament prints in editor mode, substitute the K/S blended display colour
+    // into the component extruder slots so the ColorPrint preview shows the predicted blend.
+    if (wxGetApp().is_editor() && wxGetApp().preset_bundle != nullptr) {
+        const auto& mixed_mgr = wxGetApp().preset_bundle->mixed_filaments;
+        const int num_physical = wxGetApp().filaments_cnt();
+        const auto display_cols = mixed_mgr.display_colors(); // one per enabled mixed filament
+        int mix_idx = 0;
+        for (const auto& mf : mixed_mgr.mixed_filaments()) {
+            if (!mf.enabled) continue;
+            if (mix_idx < static_cast<int>(display_cols.size())) {
+                const std::string& blended = display_cols[mix_idx];
+                const int ca = static_cast<int>(mf.component_a) - 1; // 0-based
+                const int cb = static_cast<int>(mf.component_b) - 1;
+                if (ca >= 0 && ca < num_physical && ca < static_cast<int>(tool_colors.size()))
+                    tool_colors[ca] = blended;
+                if (cb >= 0 && cb < num_physical && cb < static_cast<int>(tool_colors.size()))
+                    tool_colors[cb] = blended;
+            }
+            ++mix_idx;
+        }
+    }
     const std::vector<CustomGCode::Item>& color_print_values = wxGetApp().is_editor() ?
         wxGetApp().plater()->model().get_curr_plate_custom_gcodes().gcodes : m_gcode_result->custom_gcode_per_print_z;
     std::vector<std::string> color_print_colors;

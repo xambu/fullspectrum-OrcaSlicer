@@ -1273,9 +1273,12 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
 
     // load_toolpaths(gcode_result, build_volume, exclude_bounding_box);
     
-    // ORCA: Only show filament/color print preview if more than one tool/extruder is actually used in the toolpaths.
-    // Only reset back to Toolpaths (FeatureType) if we are currently in ColorPrint and this load is single-tool.
-    if (m_viewer.get_used_extruders_count() > 1) {
+    // ORCA: Only show filament/color print preview if more than one tool/extruder is actually used in the toolpaths,
+    // or when mixed filaments are configured (to show the K/S blended colour even for single-physical-tool prints).
+    // Only reset back to Toolpaths (FeatureType) if we are currently in ColorPrint and this load has no filament changes.
+    const bool has_mixed_filaments = wxGetApp().preset_bundle &&
+        wxGetApp().preset_bundle->mixed_filaments.enabled_count() > 0;
+    if (m_viewer.get_used_extruders_count() > 1 || has_mixed_filaments) {
         auto it = std::find(view_type_items.begin(), view_type_items.end(), libvgcode::EViewType::ColorPrint);
         if (it != view_type_items.end())
             m_view_type_sel = std::distance(view_type_items.begin(), it);
